@@ -189,12 +189,16 @@ def clean_entries(t: pd.DataFrame) -> pd.DataFrame:
             t[c] = t[c].map(norm_name)
     t["post"] = t["post"].map(schema.to_float) if "post" in t else np.nan
     # 注記行・見出しの繰り返し行などを除く
-    t = t[t["post"].notna() & t["horse_name"].notna() & (t["horse_name"] != "nan")].copy()
+    keep = t["post"].notna()
+    if "horse_name" in t:
+        keep &= t["horse_name"].notna() & (t["horse_name"] != "nan")
+    t = t[keep].copy()
     raw_fin = t["finish"].astype(str) if "finish" in t else pd.Series("", index=t.index)
     t["finish"] = pd.to_numeric(raw_fin.str.extract(r"^(\d+)")[0], errors="coerce")
-    t["status"] = "ok"
-    t.loc[raw_fin.str.contains("中止|失格", na=False), "status"] = "dnf"
-    t.loc[raw_fin.str.contains("取消|除外", na=False), "status"] = "scratch"
+    if "status" not in t:
+        t["status"] = "ok"
+        t.loc[raw_fin.str.contains("中止|失格", na=False), "status"] = "dnf"
+        t.loc[raw_fin.str.contains("取消|除外", na=False), "status"] = "scratch"
     if "sex_age" in t:
         sa = t["sex_age"].astype(str)
         t["sex"] = sa.str.extract(r"([牡牝セ騸])")[0].replace({"騸": "セ"})

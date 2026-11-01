@@ -93,24 +93,34 @@ def _check(df: pd.DataFrame):
     print(df.head(12).to_string())
 
 
-def cmd_import(a):
+IMPORT_EXTRA = {"日付": "date", "開催日": "date", "年月日": "date", "レース": "race_no", "R": "race_no",
+                "レース番号": "race_no", "水分": "moisture", "馬場水分": "moisture", "クラス": "race_class",
+                "条件": "race_class", "レース名": "race_name"}
+
+
+def import_frame(raw: pd.DataFrame) -> pd.DataFrame:
+    """日本語見出しの CSV → 正規スキーマ."""
     from .scrape.common import clean_entries, map_headers
 
-    raw = pd.read_csv(a.input)
-    m = map_headers(raw.columns)
-    # 既に正規列名の列はそのまま
-    keep = {c: c for c in raw.columns if c in schema.ALL}
-    m = {**m, **keep}
+    m = {c: IMPORT_EXTRA[c] for c in raw.columns if c in IMPORT_EXTRA}
+    m.update({c: v for c, v in map_headers([c for c in raw.columns if c not in m]).items()})
+    m.update({c: c for c in raw.columns if c in schema.ALL})  # 既に正規列名ならそのまま
     t = raw[list(m)].rename(columns=m)
-    t = clean_entries(t) if "finish" in t and t["finish"].dtype == object else t
+    t = t.loc[:, ~t.columns.duplicated()]
+    t = clean_entries(t)
+    if "moisture" in t:
+        t["moisture"] = t["moisture"].map(schema.to_float)
     for c, src in [("horse_id", "horse_name"), ("jockey_id", "jockey_name"), ("trainer_id", "trainer_name")]:
         if c not in t and src in t:
             t[c] = t[src]
     if "race_id" not in t:
-        t["race_id"] = pd.to_datetime(t["date"]).dt.strftime("%Y%m%d") + t["race_no"].astype(int).map("{:02d}".format)
-    if "status" not in t:
-        t["status"] = "ok"
-    df = schema.normalize(t)
+        t["race_id"] = (pd.to_datetime(t["date"]).dt.strftime("%Y%m%d")
+                        + t["race_no"].map(schema.to_float).astype(int).map("{:02d}".format))
+    return schema.normalize(t)
+
+
+def cmd_import(a):
+    df = import_frame(pd.read_csv(a.input))
     df.to_csv(a.out, index=False)
     print(f"{len(df)} 行を取り込み → {a.out}")
     _check(df)

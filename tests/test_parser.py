@@ -54,3 +54,20 @@ def test_parse_result_table():
 
 def test_race_id_format():
     assert netkeiba.race_id(pd.Timestamp("2024-12-30"), 1) == "202465123001"
+
+
+def test_import_japanese_csv():
+    from banei_ai.cli import import_frame
+
+    raw = pd.DataFrame({
+        "日付": ["2026/01/03"] * 3, "レース": [5, 5, 5], "馬場水分": ["2.4%"] * 3,
+        "着順": [2, 1, "中止"], "馬番": [1, 2, 3], "馬名": ["A", "B", "C"], "性齢": ["牡4", "牝5", "セ6"],
+        "負担重量": [700, 680, 690], "騎手": ["☆山田", "佐藤", "鈴木"], "タイム": ["1:50.2", "1:48.0", ""],
+        "単勝": [3.2, 2.0, 9.9], "人気": [2, 1, 3], "馬体重": ["1012(+4)", "995(-2)", "1050(0)"],
+    })
+    df = import_frame(raw)
+    r = df.set_index("post")
+    assert r.loc[2, "finish"] == 1 and r.loc[3, "status"] == "dnf"
+    assert r.loc[1, "jockey_id"] == "山田" and r.loc[1, "age"] == 4
+    assert r.loc[1, "time_sec"] == pytest.approx(110.2) and r.loc[1, "horse_weight_diff"] == 4
+    assert df["moisture"].iloc[0] == pytest.approx(2.4) and df["race_id"].iloc[0] == "2026010305"
