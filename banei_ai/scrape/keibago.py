@@ -76,9 +76,13 @@ def parse_odds(html: str) -> pd.DataFrame | None:
 
 
 def scrape_result(date: pd.Timestamp, rn: int, f: Fetcher, with_odds: bool = True) -> pd.DataFrame | None:
-    html = f.get(result_url(date, rn))
+    # 直近 2 日以内は結果が未確定・訂正の可能性があるのでキャッシュしない
+    cache = date < pd.Timestamp.today().normalize() - pd.Timedelta(days=2)
+    url = result_url(date, rn)
+    html = f.get(url, use_cache=cache)
     t = find_entry_table(html)
     if t is None or t.empty:
+        f.invalidate(url)
         return None
     t = _ids(clean_entries(t), html)
     t["race_id"] = f"{date:%Y%m%d}{rn:02d}"
@@ -87,7 +91,7 @@ def scrape_result(date: pd.Timestamp, rn: int, f: Fetcher, with_odds: bool = Tru
     t["moisture"] = find_moisture(html)
     t["race_class"] = find_race_class(html)
     if with_odds and ("odds_win" not in t or t["odds_win"].isna().all()):
-        o = parse_odds(f.get(odds_url(date, rn)))
+        o = parse_odds(f.get(odds_url(date, rn), use_cache=cache))
         if o is not None:
             t = t.drop(columns=["odds_win"], errors="ignore").merge(o, on="post", how="left")
     return t
@@ -108,7 +112,7 @@ def scrape_day(date: pd.Timestamp, f: Fetcher | None = None, max_races: int = 12
     return pd.concat(out, ignore_index=True) if out else pd.DataFrame()
 
 
-def scrape_range(start: str, end: str, days_of_week=(5, 6, 0), wait: float = 2.0) -> pd.DataFrame:
+def scrape_range(start: str, end: str, days_of_week=None, wait: float = 2.0) -> pd.DataFrame:
     f = Fetcher(wait=wait)
     frames = []
     for d in pd.date_range(start, end):

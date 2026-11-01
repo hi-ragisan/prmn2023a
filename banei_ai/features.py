@@ -380,3 +380,63 @@ FUNDAMENTAL_FEATURES = [
 MARKET_FEATURES = [
     "log_p_mkt", "h_mkt_ae", "h_last_pmkt_share", "j_mkt_ae", "j_popularity", "j_roi", "t_mkt_ae",
 ]
+
+
+# 要因説明用の日本語ラベル
+FEATURE_LABELS = {
+    "n_runners": "頭数", "moisture": "馬場水分", "class_rank": "クラス", "age": "馬齢",
+    "age_rel": "馬齢(相対)", "carried_weight": "負担重量", "cw_rel": "負担重量(レース内差)",
+    "cw_ratio": "負担重量/馬体重", "horse_weight": "馬体重", "horse_weight_diff": "馬体重増減",
+    "h_n_runs": "出走数", "h_rating": "馬レーティング", "h_days_since": "休養明け日数",
+    "h_last1_pct": "前走着順", "h_last2_pct": "2走前着順", "h_last3_pct": "3走前着順",
+    "h_avg5_pct": "近5走着順", "h_ewm_pct": "近走着順(加重)", "h_last_gap": "前走着差",
+    "h_avg3_gap": "近3走着差", "h_best5_gap": "近5走最小着差", "h_win_ae": "馬の勝率",
+    "h_top3_rate": "馬の複勝率", "h_cw_change": "負担重量の前走比", "h_cls_change": "クラス昇降",
+    "h_jockey_change": "乗り替わり", "h_moist_apt": "馬場水分適性", "h_moist_n": "同水分帯経験",
+    "h_heavy_perf": "重い斤量での成績", "h_spd_last": "前走スピード指数",
+    "h_spd_avg3": "近3走スピード指数", "h_spd_best5": "近5走最高スピード指数",
+    "h_spd_ewm": "スピード指数(加重)", "j_rides": "騎手騎乗数", "j_win_ae": "騎手の勝率",
+    "j_top3_ae": "騎手の複勝率", "t_win_ae": "調教師の勝率", "jh_rides": "コンビ騎乗数",
+    "jh_win_ae": "コンビ実績", "r_cw_rank": "負担重量順位",
+}
+
+
+def feature_label(name: str) -> str:
+    if name in FEATURE_LABELS:
+        return FEATURE_LABELS[name]
+    if name.startswith("r_"):
+        for suf, tag in (("_diff", "レース内差"), ("_rank", "レース内順位")):
+            if name.endswith(suf):
+                base = name[2: -len(suf)]
+                return f"{FEATURE_LABELS.get(base, base)}({tag})"
+    return name
+
+
+# 要因説明のグループ (関連する特徴量をまとめて「何が効いているか」を読みやすくする)
+EXPLAIN_GROUPS = [
+    ("負担重量", ["carried_weight", "cw_rel", "cw_ratio", "cw"]),
+    ("斤量の前走比", ["h_cw_change"]),
+    ("重い斤量での実績", ["h_heavy_perf"]),
+    ("馬齢", ["age", "age_rel"]),
+    ("騎手の腕", ["j_win_ae", "j_top3_ae", "j_rides"]),
+    ("騎手×馬コンビ", ["jh_rides", "jh_win_ae"]),
+    ("調教師", ["t_win_ae"]),
+    ("馬の実績・格", ["h_rating", "h_win_ae", "h_top3_rate", "h_n_runs"]),
+    ("近走着順", ["h_last1_pct", "h_last2_pct", "h_last3_pct", "h_avg5_pct", "h_ewm_pct"]),
+    ("タイム・スピード指数", ["h_last_gap", "h_avg3_gap", "h_best5_gap",
+                     "h_spd_last", "h_spd_avg3", "h_spd_best5", "h_spd_ewm"]),
+    ("馬場水分適性", ["h_moist_apt", "h_moist_n", "moisture"]),
+    ("馬体重", ["horse_weight", "horse_weight_diff"]),
+    ("休養明け", ["h_days_since"]),
+    ("クラス昇降", ["class_rank", "h_cls_change"]),
+    ("乗り替わり", ["h_jockey_change"]),
+    ("頭数", ["n_runners"]),
+]
+_GROUP_OF = {f: g for g, fs in EXPLAIN_GROUPS for f in fs}
+
+
+def explain_group(name: str) -> str:
+    base = name
+    if name.startswith("r_") and (name.endswith("_diff") or name.endswith("_rank")):
+        base = name[2:-5]
+    return _GROUP_OF.get(base, feature_label(base))

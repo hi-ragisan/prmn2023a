@@ -6,7 +6,7 @@ import pandas as pd
 
 from .backtest import BetRule
 from .clogit import harville_top3
-from .features import build_features
+from .features import build_features, explain_group
 from .model import BaneiModel
 
 
@@ -33,7 +33,23 @@ def predict_card(history: pd.DataFrame, card: pd.DataFrame, model: BaneiModel,
     f = kelly_fraction * (P["ev"] - 1) / (P["odds_win"] - 1)
     P["kelly_stake"] = np.where(P["bet"], np.floor(np.clip(f, 0, kelly_cap) * bankroll / 100) * 100, 0)
     P["rank_model"] = P.groupby("race_id")["p_model"].rank(ascending=False, method="min")
+    P = P.join(explain(P, model))
     return P.sort_values(["race_no", "post"])
+
+
+def explain(P: pd.DataFrame, model: BaneiModel, k_pos: int = 3, k_neg: int = 2) -> pd.DataFrame:
+    """能力スコアのプラス要因・マイナス要因 (レース内平均との差で見る)."""
+    C = model.stage1.contributions(P)
+    # 同じレースの他馬と比べた寄与 (レース共通の要因は打ち消す)
+    C = C - C.groupby(P["race_id"]).transform("mean")
+    # 関連する特徴量 (絶対値・レース内差・順位など) を要因グループにまとめる
+    G = C.T.groupby([explain_group(c) for c in C.columns]).sum().T
+    pos, neg = [], []
+    for _, row in G.iterrows():
+        s = row.sort_values()
+        pos.append("・".join([c for c, v in s[::-1].items() if v > 0.02][:k_pos]))
+        neg.append("・".join([c for c, v in s.items() if v < -0.02][:k_neg]))
+    return pd.DataFrame({"plus_factors": pos, "minus_factors": neg}, index=P.index)
 
 
 DISPLAY = [
@@ -43,6 +59,7 @@ DISPLAY = [
     ("edge", "歪み"), ("ev", "期待値"), ("fair_odds", "適正オッズ"),
     ("h_rating", "馬レート"), ("j_win_ae", "騎手力"), ("h_moist_apt", "水分適性"),
     ("bet", "推奨"), ("kelly_stake", "ケリー額"),
+    ("plus_factors", "プラス要因"), ("minus_factors", "マイナス要因"),
 ]
 
 

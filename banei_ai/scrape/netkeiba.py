@@ -50,22 +50,26 @@ def scrape_day(date: pd.Timestamp, fetcher: Fetcher | None = None, max_races: in
     """1 日分。1R が取れなければ開催なしとみなす."""
     fetcher = fetcher or Fetcher(encoding="euc-jp")
     out = []
+    # 直近 2 日以内は結果が未確定・訂正の可能性があるのでキャッシュしない
+    recent = date >= pd.Timestamp.today().normalize() - pd.Timedelta(days=2)
     for rn in range(1, max_races + 1):
         rid = race_id(date, rn)
+        url = result_url(rid)
         try:
-            html = fetcher.get(result_url(rid))
+            html = fetcher.get(url, use_cache=not recent)
         except Exception as e:  # noqa: BLE001
             print(f"  {rid}: 取得失敗 {e}")
             break
         df = parse_result(html, rid, date, rn)
-        if df is None:
+        if df is None or df["finish"].notna().sum() == 0:
+            fetcher.invalidate(url)
             break
         out.append(df)
     return pd.concat(out, ignore_index=True) if out else pd.DataFrame()
 
 
-def scrape_range(start: str, end: str, days_of_week=(5, 6, 0), wait: float = 2.0) -> pd.DataFrame:
-    """期間内の開催日 (既定: 土日月) を総当たりで取得."""
+def scrape_range(start: str, end: str, days_of_week=None, wait: float = 2.0) -> pd.DataFrame:
+    """期間内の全日を総当たりで取得 (非開催日は 1R が無いので 1 リクエストで飛ばす)."""
     f = Fetcher(encoding="euc-jp", wait=wait)
     frames = []
     for d in pd.date_range(start, end):

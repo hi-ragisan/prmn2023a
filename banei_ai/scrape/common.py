@@ -31,6 +31,12 @@ class Fetcher:
         h = hashlib.sha1(url.encode()).hexdigest()[:20]
         return self.cache_dir / f"{h}.html"
 
+    def invalidate(self, url: str) -> None:
+        """パースできなかったページ (開催なし・結果未確定) のキャッシュを消す."""
+        p = self._path(url)
+        if p.exists():
+            p.unlink()
+
     def get(self, url: str, use_cache: bool = True) -> str:
         p = self._path(url)
         if use_cache and p.exists():
@@ -46,7 +52,8 @@ class Fetcher:
         elif r.encoding is None or r.encoding.lower() == "iso-8859-1":
             r.encoding = r.apparent_encoding
         text = r.text
-        p.write_text(text, encoding="utf-8")
+        if use_cache:
+            p.write_text(text, encoding="utf-8")
         return text
 
 
@@ -181,6 +188,8 @@ def clean_entries(t: pd.DataFrame) -> pd.DataFrame:
         if c in t:
             t[c] = t[c].map(norm_name)
     t["post"] = t["post"].map(schema.to_float) if "post" in t else np.nan
+    # 注記行・見出しの繰り返し行などを除く
+    t = t[t["post"].notna() & t["horse_name"].notna() & (t["horse_name"] != "nan")].copy()
     raw_fin = t["finish"].astype(str) if "finish" in t else pd.Series("", index=t.index)
     t["finish"] = pd.to_numeric(raw_fin.str.extract(r"^(\d+)")[0], errors="coerce")
     t["status"] = "ok"

@@ -75,6 +75,16 @@ class Stage1:
             return self.fallback.utility(X)
         return self.booster.predict(X)
 
+    def contributions(self, d: pd.DataFrame) -> pd.DataFrame:
+        """各馬のスコアへの特徴量ごとの寄与 (LightGBM の SHAP 値)."""
+        X = d.reindex(columns=self.features).astype(float)
+        if self.booster is None:
+            c = self.fallback.coef_ / self.fallback.scale_
+            Z = (X - self.fallback.mean_).fillna(0.0)
+            return pd.DataFrame(Z.to_numpy() * c, index=d.index, columns=self.features)
+        v = self.booster.predict(X, pred_contrib=True)[:, :-1]
+        return pd.DataFrame(v, index=d.index, columns=self.features)
+
     def importance(self) -> pd.Series:
         if self.booster is None:
             t = self.fallback.coef_table().set_index("feature")["coef_std"].abs()
