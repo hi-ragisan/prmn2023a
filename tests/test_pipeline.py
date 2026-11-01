@@ -24,6 +24,10 @@ def test_walk_forward_and_market_sanity(data):
     assert t["市場 (オッズそのまま)"] < t["一様 (1/頭数)"]
     # 市場確率 (較正後) だけで期待値 > 1.2 の馬はほぼ見つからない
     assert ((P["p_mkt_cal"] * P["odds_win"]) > 1.2).mean() < 0.01
+    from banei_ai.backtest import split_half_check
+
+    sh = split_half_check(P, min_bets=5)
+    assert sh["chosen_min_ev"] is not None and sh["second_half_bets"] >= 0
 
 
 def test_train_and_predict_card(data):

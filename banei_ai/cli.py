@@ -142,6 +142,7 @@ def cmd_backtest(a):
     from .market import fit_power_calibration
 
     alpha = fit_power_calibration(P)
+    sh = B.split_half_check(P)
     lines = [
         "# バックテスト結果 (ウォークフォワード・完全サンプル外)\n",
         f"- データ: {a.data}",
@@ -152,6 +153,12 @@ def cmd_backtest(a):
         "\n## 期待値しきい値ごとの成績 (単勝・100円均等 / 1/4ケリー)\n",
         grid.to_markdown(index=False, floatfmt=".3f"),
         f"\n## 採用ルール min_ev={a.min_ev}: 回収率 90% 区間 [{lo:.3f}, {hi:.3f}] (レース単位ブートストラップ)\n",
+        "## 前半で選んだしきい値を後半に適用 (しきい値選びの楽観バイアスを除いた成績)\n",
+        (f"- 分割日 {sh['cut']:%Y-%m-%d}: 前半で最良の min_ev = {sh['chosen_min_ev']} (前半回収率 {sh['first_half_roi']:.3f})\n"
+         f"- **後半: {sh['second_half_bets']} 点, 回収率 {sh['second_half_roi']:.3f} "
+         f"(90% 区間 [{sh['second_half_roi_lo90']:.3f}, {sh['second_half_roi_hi90']:.3f}])**\n"
+         "- 区間の下限が 1 を超えていれば、実戦でもプラスが期待できる根拠になる\n")
+        if sh.get("chosen_min_ev") is not None else "- 前半に十分な購入点数がありませんでした\n",
         per.to_markdown(index=False, floatfmt=".3f") if not per.empty else "(該当なし)",
         "\n## 較正 (AI 勝率 vs 実際の勝率)\n",
         cal.to_markdown(floatfmt=".3f"),
@@ -166,6 +173,7 @@ def cmd_backtest(a):
     out.write_text("\n".join(lines), encoding="utf-8")
     print("\n".join(lines[:9]))
     print(grid.to_string(index=False))
+    print("\n" + "\n".join(l for l in lines if "前半" in l or "後半" in l))
     print(f"\n詳細 → {out}")
 
 

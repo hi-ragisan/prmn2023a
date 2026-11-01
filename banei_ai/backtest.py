@@ -97,6 +97,27 @@ def threshold_grid(P: pd.DataFrame, p_col: str = "p_model",
     return pd.DataFrame(rows)
 
 
+def split_half_check(P: pd.DataFrame, p_col: str = "p_model",
+                     evs=(1.0, 1.05, 1.1, 1.2, 1.3), min_bets: int = 30) -> dict:
+    """前半でしきい値を選び、後半にそのまま適用 (しきい値選びの楽観バイアスを除いた成績)."""
+    races = P[["date", "race_id"]].drop_duplicates().sort_values("date")
+    cut = races["date"].iloc[len(races) // 2]
+    first, second = P[P["date"] < cut], P[P["date"] >= cut]
+    best, best_roi = None, -np.inf
+    for ev in evs:
+        r = flat_bet(BetRule(min_ev=ev).select(first, p_col))
+        if r["bets"] >= min_bets and r["roi"] > best_roi:
+            best, best_roi = ev, r["roi"]
+    if best is None:
+        return {"cut": cut, "chosen_min_ev": None}
+    b2 = BetRule(min_ev=best).select(second, p_col)
+    r2 = flat_bet(b2)
+    lo, hi = bootstrap_roi(b2)
+    return {"cut": cut, "chosen_min_ev": best, "first_half_roi": best_roi,
+            "second_half_bets": r2["bets"], "second_half_roi": r2["roi"],
+            "second_half_roi_lo90": lo, "second_half_roi_hi90": hi}
+
+
 def by_period(P: pd.DataFrame, rule: BetRule, p_col: str = "p_model", freq: str = "QS") -> pd.DataFrame:
     """期間別の安定性 (どの時期でも勝てているか)."""
     b = rule.select(P, p_col)
