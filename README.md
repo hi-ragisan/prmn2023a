@@ -70,7 +70,7 @@
 
 ```bash
 pip install -r requirements.txt
-python -m pytest -q tests        # 16 件のテスト (約1.5分)
+python -m pytest -q tests        # 17 件のテスト (約1.5分)
 ```
 
 ## 使い方

@@ -103,3 +103,12 @@ def test_ids_keep_leading_zeros(tmp_path):
     pd.DataFrame({"race_id": ["2024010101"], "jockey_id": ["05385"], "trainer_id": ["01001"]}).to_csv(f, index=False)
     d = schema.read_csv(f)
     assert d.loc[0, "jockey_id"] == "05385" and d.loc[0, "trainer_id"] == "01001"
+
+
+def test_attach_ids_with_pedigree_in_cell():
+    from banei_ai.scrape.common import attach_ids
+
+    t = pd.DataFrame({"horse_name": ["アオノキセキ父:キタノ母:ハル", "ベニスズラン", "ナゾノウマ"]})
+    t = attach_ids(t, "horse_name", "horse_id", {"アオノキセキ": "H1", "ベニスズラン": "H2"})
+    assert t["horse_id"].tolist() == ["H1", "H2", "ナゾノウマ"]
+    assert t["horse_name"].tolist() == ["アオノキセキ", "ベニスズラン", "ナゾノウマ"]

@@ -153,6 +153,30 @@ def link_ids(html: str, pattern: str) -> dict[str, str]:
     return out
 
 
+def attach_ids(t: pd.DataFrame, name_col: str, id_col: str, mapping: dict[str, str]) -> pd.DataFrame:
+    """名前→ID 対応で ID を付ける.
+
+    セルに父・母名などが一緒に入っていて完全一致しない場合は、リンク文字列がセルの先頭に
+    一致するもの (最長一致) を採用し、名前もリンク文字列に置き換える。見つからなければ名前を ID にする。
+    """
+    if name_col not in t:
+        t[id_col] = np.nan
+        return t
+    names = sorted(mapping, key=len, reverse=True)
+    ids, fixed = [], []
+    for v in t[name_col].astype(str):
+        if v in mapping:
+            ids.append(mapping[v])
+            fixed.append(v)
+            continue
+        hit = next((n for n in names if v.startswith(n)), None)
+        ids.append(mapping[hit] if hit else v)
+        fixed.append(hit or v)
+    t[name_col] = fixed
+    t[id_col] = ids
+    return t
+
+
 def find_moisture(html: str) -> float:
     """ページ本文から馬場水分 (%) を探す."""
     from bs4 import BeautifulSoup

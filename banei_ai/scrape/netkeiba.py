@@ -9,7 +9,8 @@ import numpy as np
 import pandas as pd
 
 from .. import config
-from .common import Fetcher, clean_entries, find_entry_table, find_moisture, find_race_class, link_ids
+from .common import (Fetcher, attach_ids, clean_entries, find_entry_table, find_moisture,
+                     find_race_class, link_ids)
 
 BASE = "https://nar.netkeiba.com"
 
@@ -34,10 +35,10 @@ def parse_result(html: str, rid: str, date: pd.Timestamp, race_no: int) -> pd.Da
     horses = link_ids(html, r"/horse/(?!ped|result|top|search)(\w+)")
     jockeys = link_ids(html, r"/jockey/(?:result/recent/)?(?!result|profile|search)(\w+)")
     trainers = link_ids(html, r"/trainer/(?:result/recent/)?(?!result|profile|search)(\w+)")
-    t["horse_id"] = t["horse_name"].map(horses).fillna(t["horse_name"])
-    t["jockey_id"] = t["jockey_name"].map(jockeys).fillna(t["jockey_name"])
+    t = attach_ids(t, "horse_name", "horse_id", horses)
+    t = attach_ids(t, "jockey_name", "jockey_id", jockeys)
     if "trainer_name" in t:
-        t["trainer_id"] = t["trainer_name"].map(trainers).fillna(t["trainer_name"])
+        t = attach_ids(t, "trainer_name", "trainer_id", trainers)
     t["race_id"] = rid
     t["date"] = date
     t["race_no"] = race_no

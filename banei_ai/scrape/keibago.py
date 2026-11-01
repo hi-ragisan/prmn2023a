@@ -9,7 +9,8 @@ import numpy as np
 import pandas as pd
 
 from .. import config
-from .common import Fetcher, clean_entries, find_entry_table, find_moisture, find_race_class, link_ids
+from .common import (Fetcher, attach_ids, clean_entries, find_entry_table, find_moisture,
+                     find_race_class, link_ids)
 
 BASE = "https://www.keiba.go.jp/KeibaWeb/TodayRaceInfo"
 
@@ -41,10 +42,10 @@ def _ids(t: pd.DataFrame, html: str) -> pd.DataFrame:
     horses = link_ids(html, r"k_lineageLoginCode=(\w+)")
     jockeys = link_ids(html, r"k_riderLicenseNo=(\w+)")
     trainers = link_ids(html, r"k_trainerLicenseNo=(\w+)")
-    t["horse_id"] = t["horse_name"].map(horses).fillna(t["horse_name"])
-    t["jockey_id"] = t["jockey_name"].map(jockeys).fillna(t["jockey_name"]) if "jockey_name" in t else np.nan
+    t = attach_ids(t, "horse_name", "horse_id", horses)
+    t = attach_ids(t, "jockey_name", "jockey_id", jockeys)
     if "trainer_name" in t:
-        t["trainer_id"] = t["trainer_name"].map(trainers).fillna(t["trainer_name"])
+        t = attach_ids(t, "trainer_name", "trainer_id", trainers)
     return t
 
 
