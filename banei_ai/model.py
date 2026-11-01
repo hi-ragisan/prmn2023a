@@ -1,6 +1,6 @@
 """二段階モデル (Benter 方式).
 
-Stage1  ファンダメンタル: LightGBM LambdaRank (オッズは使わない)
+Stage1  ファンダメンタル: LightGBM ランキング学習 (rank_xendcg, オッズは使わない)
         → 馬・騎手・負担重量・馬場水分などから「強さスコア」s1 を出す
 Stage2  合成: 条件付きロジット  u = a·s1 + b·log(p_mkt) + c·(市場系特徴量)
         → 市場の情報とモデルの情報を最適に混ぜた勝率 p_model
@@ -40,7 +40,8 @@ def _relevance(d: pd.DataFrame) -> np.ndarray:
 class Stage1:
     features: list[str] = field(default_factory=lambda: list(FUNDAMENTAL_FEATURES))
     params: dict = field(default_factory=lambda: dict(
-        objective="lambdarank",
+        # rank_xendcg: シミュレーション 3 シードで lambdarank より一貫して良かった
+        objective="rank_xendcg",
         learning_rate=0.03,
         num_leaves=15,
         min_data_in_leaf=60,
@@ -48,7 +49,6 @@ class Stage1:
         bagging_fraction=0.8,
         bagging_freq=1,
         lambda_l2=5.0,
-        lambdarank_truncation_level=5,
         verbose=-1,
         seed=config.RANDOM_SEED,
     ))

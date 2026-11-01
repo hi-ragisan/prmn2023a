@@ -2,6 +2,7 @@
 
   python -m banei_ai.cli simulate                     検証用データを生成
   python -m banei_ai.cli scrape --start 2023-04-01 --end 2026-03-31 --source netkeiba
+  python -m banei_ai.cli update                       最終日から昨日までを追加取得 (日々の運用)
   python -m banei_ai.cli import-csv --in mydata.csv   手持ち CSV (日本語見出し可) を取り込み
   python -m banei_ai.cli backtest                     ウォークフォワード検証 + 歪みレポート
   python -m banei_ai.cli report                       騎手・馬の良し悪し + 歪みの棚卸し
@@ -66,6 +67,23 @@ def cmd_scrape(a):
     print(f"{len(df)} 行 / {df['race_id'].nunique()} レース → {out}")
     if a.check:
         _check(df)
+
+
+def cmd_update(a):
+    """データの最終日の翌日から昨日までを追加取得."""
+    out = Path(a.out)
+    if out.exists():
+        old = pd.read_csv(out, usecols=["date"])
+        start = pd.to_datetime(old["date"]).max() + pd.Timedelta(days=1)
+    else:
+        start = pd.Timestamp.today().normalize() - pd.Timedelta(days=30)
+    end = pd.Timestamp.today().normalize() - pd.Timedelta(days=1)
+    if start > end:
+        print("最新です")
+        return
+    print(f"{start:%Y-%m-%d} 〜 {end:%Y-%m-%d} を取得します")
+    a.start, a.end, a.overwrite, a.check = f"{start:%Y-%m-%d}", f"{end:%Y-%m-%d}", False, False
+    cmd_scrape(a)
 
 
 def _check(df: pd.DataFrame):
@@ -244,6 +262,12 @@ def main(argv=None):
     s.add_argument("--overwrite", action="store_true")
     s.add_argument("--check", action="store_true", help="取得後にデータ品質を表示")
     s.set_defaults(fn=cmd_scrape)
+
+    s = sub.add_parser("update", help="最終日から昨日までを追加取得")
+    s.add_argument("--source", choices=["netkeiba", "keibago"], default="netkeiba")
+    s.add_argument("--out", default=str(DEFAULT_DATA))
+    s.add_argument("--wait", type=float, default=2.0)
+    s.set_defaults(fn=cmd_update)
 
     s = sub.add_parser("import-csv", help="手持ち CSV を取り込み")
     s.add_argument("--in", dest="input", required=True)

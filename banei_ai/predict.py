@@ -28,6 +28,9 @@ def predict_card(history: pd.DataFrame, card: pd.DataFrame, model: BaneiModel,
     for rid, g in P.groupby("race_id"):
         P.loc[g.index, "p_top3"] = harville_top3(g["p_model"].to_numpy())
     P["fair_odds"] = 1.0 / P["p_model"]
+    # 複勝: オッズは幅で出るので下限で保守的に評価 (Harville は穴馬の複勝率をやや過大評価しがち)
+    if "place_min" in P:
+        P["ev_place"] = P["p_top3"] * P["place_min"]
     chosen = rule.select(P) if P["odds_win"].notna().any() else P.iloc[0:0]
     P["bet"] = P.index.isin(chosen.index)
     f = kelly_fraction * (P["ev"] - 1) / (P["odds_win"] - 1)
@@ -57,6 +60,7 @@ DISPLAY = [
     ("carried_weight", "負担重量"), ("odds_win", "単勝"), ("p_mkt", "市場確率"),
     ("p_fund", "能力確率"), ("p_model", "AI勝率"), ("p_top3", "AI複勝率"),
     ("edge", "歪み"), ("ev", "期待値"), ("fair_odds", "適正オッズ"),
+    ("place_min", "複勝下限"), ("ev_place", "複勝期待値"),
     ("h_rating", "馬レート"), ("j_win_ae", "騎手力"), ("h_moist_apt", "水分適性"),
     ("bet", "推奨"), ("kelly_stake", "ケリー額"),
     ("plus_factors", "プラス要因"), ("minus_factors", "マイナス要因"),
@@ -69,7 +73,7 @@ def format_table(P: pd.DataFrame) -> pd.DataFrame:
     for c in ["市場確率", "能力確率", "AI勝率", "AI複勝率", "歪み"]:
         if c in t:
             t[c] = (t[c] * 100).round(1)
-    for c in ["期待値", "騎手力", "水分適性"]:
+    for c in ["期待値", "複勝期待値", "騎手力", "水分適性"]:
         if c in t:
             t[c] = t[c].round(2)
     for c in ["適正オッズ"]:
