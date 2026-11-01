@@ -200,6 +200,7 @@ def build_features(df: pd.DataFrame, upto_results: bool = True) -> pd.DataFrame:
     trainers: dict[str, Decayed] = {}
     combo: dict[tuple[str, str], np.ndarray] = defaultdict(lambda: np.zeros(3))
     tb = TimeBaseline()
+    jmoist: dict[tuple[str, int], Decayed] = {}  # 騎手×水分帯: [勝利, 期待勝利]
 
     def jget(key: str, t) -> np.ndarray:
         if key not in jockeys:
@@ -280,6 +281,14 @@ def build_features(df: pd.DataFrame, upto_results: bool = True) -> pd.DataFrame:
             f["j_mkt_ae"] = _beta_shrink(jv[1], jv[5], config.JOCKEY_PRIOR_STRENGTH / 10)
             f["j_popularity"] = (jv[6] + 10) / (jv[7] + 10)  # 1 = 平均的な人気
             f["j_roi"] = (jv[8] + 0.8 * 30) / (jv[7] + 30)
+            # 騎手×馬場水分: 今回の水分帯での A/E を、騎手全体の A/E に対する比で
+            jm = jmoist.get((r.jockey_id, r.moist_bin))
+            if jm is not None:
+                v = jm.get(date)
+                k = 4.0
+                f["j_moist_rel"] = ((v[0] + k * f["j_win_ae"]) / (v[1] + k)) / f["j_win_ae"]
+            else:
+                f["j_moist_rel"] = 1.0
             # 調教師
             tv = tget(str(r.trainer_id), date)
             f["t_win_ae"] = _beta_shrink(tv[1], tv[3], config.TRAINER_PRIOR_STRENGTH / 10)
@@ -330,6 +339,10 @@ def build_features(df: pd.DataFrame, upto_results: bool = True) -> pd.DataFrame:
                 trainers[str(row.trainer_id)].add(date, vec)
                 cv = combo[(row.jockey_id, row.horse_id)]
                 cv += np.array([1.0, row.win, 1.0 / n])
+                jk = (row.jockey_id, int(row.moist_bin))
+                if jk not in jmoist:
+                    jmoist[jk] = Decayed(2, config.JOCKEY_HALF_LIFE_DAYS * 2)
+                jmoist[jk].add(date, np.array([row.win, 1.0 / n]))
             ok = race["status"].eq("ok").to_numpy()
             tb.add(race["moisture"].to_numpy()[ok], race["carried_weight"].to_numpy()[ok],
                    race["time_sec"].to_numpy()[ok])
@@ -371,7 +384,7 @@ FUNDAMENTAL_FEATURES = [
     "h_win_ae", "h_top3_rate", "h_cw_change", "h_cls_change", "h_jockey_change",
     "h_moist_apt", "h_moist_n", "h_heavy_perf",
     "h_spd_last", "h_spd_avg3", "h_spd_best5", "h_spd_ewm",
-    "j_rides", "j_win_ae", "j_top3_ae", "t_win_ae",
+    "j_rides", "j_win_ae", "j_top3_ae", "j_moist_rel", "t_win_ae",
     "jh_rides", "jh_win_ae",
     "r_cw_rank",
 ] + [f"r_{c}_{k}" for c in REL_COLS for k in ("diff", "rank")]
@@ -397,7 +410,7 @@ FEATURE_LABELS = {
     "h_spd_avg3": "近3走スピード指数", "h_spd_best5": "近5走最高スピード指数",
     "h_spd_ewm": "スピード指数(加重)", "j_rides": "騎手騎乗数", "j_win_ae": "騎手の勝率",
     "j_top3_ae": "騎手の複勝率", "t_win_ae": "調教師の勝率", "jh_rides": "コンビ騎乗数",
-    "jh_win_ae": "コンビ実績", "r_cw_rank": "負担重量順位",
+    "jh_win_ae": "コンビ実績", "r_cw_rank": "負担重量順位", "j_moist_rel": "騎手の水分帯相性",
 }
 
 
@@ -419,6 +432,7 @@ EXPLAIN_GROUPS = [
     ("重い斤量での実績", ["h_heavy_perf"]),
     ("馬齢", ["age", "age_rel"]),
     ("騎手の腕", ["j_win_ae", "j_top3_ae", "j_rides"]),
+    ("騎手×馬場水分", ["j_moist_rel"]),
     ("騎手×馬コンビ", ["jh_rides", "jh_win_ae"]),
     ("調教師", ["t_win_ae"]),
     ("馬の実績・格", ["h_rating", "h_win_ae", "h_top3_rate", "h_n_runs"]),
