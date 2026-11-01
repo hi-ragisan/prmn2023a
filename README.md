@@ -159,6 +159,13 @@ python -m banei_ai.cli predict --date 2026-11-02 --card card.csv   # 出馬表 C
 | 馬レート / 騎手力 / 水分適性 | 根拠の確認用 |
 | 推奨 / ケリー額 | 購入条件を満たす馬に ◎、1/4ケリーでの金額（資金10万円・1点上限3%） |
 
+毎日の運用は `scripts/daily.sh` にまとめてあります（昨日までの結果を追加取得 → 月曜は再学習 → 今日の予測）。
+
+```bash
+scripts/daily.sh            # 全レース
+scripts/daily.sh --race 7   # 7R だけ (締切直前の再計算に)
+```
+
 購入条件は `backtest.BetRule`（期待値≥1.10、AI勝率≥3%、オッズ≤50倍、1レース最大2頭）。`--min-ev` で変更可能。
 
 ---
@@ -208,7 +215,8 @@ python -m banei_ai.cli report   --data data/interim/simulated.csv
 
 最後の行がわずかに良いものの、前走着順・馬体重はシミュレーションに意図的に埋め込んだ歪みそのものなので、
 「答えを知っているテストへの合わせ込み」を避けて既定には入れていません。
-実データで試す場合は `banei_ai/model.py` の `STAGE2_MARKET_EXTRA` に `"h_last1_pct", "horse_weight_diff"` を加えて `backtest` で比較してください。
+実データで試す場合は `python scripts/experiments.py --data data/interim/races.csv` で同じ比較を再現できます
+（採用するなら `banei_ai/model.py` の `STAGE2_MARKET_EXTRA` を変更）。
 
 **これらはあくまで「仕組みが正しく動くか」の確認であり、実際のばんえい競馬で同じ回収率が出ることを意味しません。**
 実際の市場はこのシミュレーションよりずっと効率的なはずです。実データで `backtest` を回して判断してください。
@@ -244,5 +252,8 @@ banei_ai/
   scrape/        netkeiba・keiba.go.jp パーサー (見出し語ベース)
   simulate.py    検証用シミュレーター
   cli.py         コマンドライン
+scripts/
+  daily.sh       日々の運用 (update → train → predict)
+  experiments.py 設計比較実験の再現
 tests/           リーク検査・推定の正しさ・パーサーのテスト
 ```
