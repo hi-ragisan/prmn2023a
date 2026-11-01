@@ -119,7 +119,8 @@ class Stage2:
         out = pd.DataFrame(index=d.index)
         rid = d["race_id"].to_numpy()
         out["p_fund"] = self.fund_.predict_proba(d[["s1"]], rid)
-        has = d["p_mkt"].notna()
+        # レース内の全馬にオッズがある場合だけ市場と合成 (一部欠けると確率の合計が崩れる)
+        has = d["p_mkt"].notna().groupby(d["race_id"]).transform("all")
         out["p_mkt_cal"] = np.nan
         out["p_model"] = out["p_fund"]
         if has.any():

@@ -63,7 +63,7 @@ def main():
     ap.add_argument("--seeds", default="42,7,123")
     a = ap.parse_args()
     if a.data:
-        datasets = {"real": build_features(schema.normalize(pd.read_csv(a.data, dtype={"race_id": str})))}
+        datasets = {"real": build_features(schema.normalize(schema.read_csv(a.data)))}
     else:
         datasets = {f"sim{s}": build_features(simulate(SimConfig(end="2025-09-30", seed=int(s))))
                     for s in a.seeds.split(",")}

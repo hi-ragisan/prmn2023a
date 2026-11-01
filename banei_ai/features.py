@@ -261,7 +261,7 @@ def build_features(df: pd.DataFrame, upto_results: bool = True) -> pd.DataFrame:
                     f["h_spd_ewm"] = float((sp * ww).sum() / ww.sum())
                 f["h_cw_change"] = r.carried_weight - last.cw
                 f["h_cls_change"] = r.class_rank - last.cls if not np.isnan(last.cls) else np.nan
-                f["h_jockey_change"] = float(r.jockey_id != last.jockey)
+                f["h_jockey_change"] = float(str(r.jockey_id) != last.jockey)
                 # 馬場水分適性: 同じ水分帯での成績 - 全体平均 (縮小)
                 perf_all = np.array([x.perf for x in runs])
                 mb = np.array([x.moist_bin for x in runs])

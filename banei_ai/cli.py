@@ -29,8 +29,7 @@ def _load(path: str | Path) -> pd.DataFrame:
     path = Path(path)
     if not path.exists():
         raise SystemExit(f"{path} がありません。先に scrape / import-csv / simulate を実行してください")
-    return schema.normalize(pd.read_csv(path, dtype={"race_id": str, "horse_id": str,
-                                                     "jockey_id": str, "trainer_id": str}))
+    return schema.normalize(schema.read_csv(path))
 
 
 def _features(df: pd.DataFrame, cache: Path | None = None) -> pd.DataFrame:
@@ -59,7 +58,7 @@ def cmd_scrape(a):
         return
     out = Path(a.out)
     if out.exists() and not a.overwrite:
-        old = pd.read_csv(out, dtype={"race_id": str})
+        old = schema.read_csv(out)
         df = pd.concat([old, df]).drop_duplicates(["race_id", "post"], keep="last")
     df = schema.normalize(df)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -219,17 +218,14 @@ def cmd_predict(a):
     model = BaneiModel.load(Path(a.model))
     date = pd.Timestamp(a.date)
     if a.card:
-        card = pd.read_csv(a.card, dtype={"race_id": str, "horse_id": str, "jockey_id": str})
+        card = schema.read_csv(a.card)
         card["date"] = pd.to_datetime(card["date"])
     else:
-        from .scrape import keibago
-
         races = []
-        f = keibago.Fetcher(wait=a.wait)
         for rn in range(1, 13):
             if a.race and rn != a.race:
                 continue
-            t = keibago.scrape_card(date, rn, f)
+            t = _fetch_card(date, rn, a.card_source, a.wait)
             if t is None:
                 if not a.race:
                     break
@@ -250,6 +246,33 @@ def cmd_predict(a):
     t.to_csv(out, index=False, encoding="utf-8-sig")
     print(f"\n→ {out}")
     print("※ 歪み = AI勝率/市場確率 - 1 (%)。期待値 = AI勝率 × 単勝オッズ。締切直前のオッズで再計算推奨。")
+
+
+def _fetch_card(date: pd.Timestamp, rn: int, source: str, wait: float) -> pd.DataFrame | None:
+    """出馬表を取得. 馬・騎手 ID は過去データと同じ取得元に揃える必要がある.
+
+    netkeiba: 出馬表 (ID は netkeiba 体系) + オッズは keiba.go.jp から馬番で結合
+    keibago : 出馬表もオッズも keiba.go.jp (過去データも keibago で集めた場合)
+    """
+    from .scrape import keibago
+
+    if source == "keibago":
+        return keibago.scrape_card(date, rn, keibago.Fetcher(wait=wait))
+    from .scrape import netkeiba
+
+    t = netkeiba.scrape_card(date, rn, netkeiba.Fetcher(encoding="euc-jp", wait=wait))
+    if t is None:
+        return None
+    try:
+        f = keibago.Fetcher(wait=wait)
+        o = keibago.parse_odds(f.get(keibago.odds_url(date, rn), use_cache=False))
+    except Exception as e:  # noqa: BLE001
+        print(f"  {rn}R: オッズ取得失敗 {e}")
+        o = None
+    if o is not None and not o.empty:
+        t = t.drop(columns=[c for c in ("odds_win", "place_min", "place_max") if c in t]).merge(
+            o, on="post", how="left")
+    return t
 
 
 def main(argv=None):
@@ -300,6 +323,8 @@ def main(argv=None):
     s.add_argument("--date", required=True)
     s.add_argument("--race", type=int, default=None)
     s.add_argument("--card", default=None, help="出馬表 CSV (正規スキーマ, status=entry)")
+    s.add_argument("--card-source", choices=["netkeiba", "keibago"], default="netkeiba",
+                   help="出馬表の取得元。過去データ (scrape --source) と必ず揃える")
     s.add_argument("--data", default=str(DEFAULT_DATA))
     s.add_argument("--model", default=str(DEFAULT_MODEL))
     s.add_argument("--min-ev", type=float, default=1.10)

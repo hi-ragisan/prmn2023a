@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 
 from .backtest import BetRule
-from .clogit import harville_top3
+from .clogit import harville_top3, place_prob
 from .features import build_features, explain_group
 from .model import BaneiModel
 
@@ -16,21 +16,30 @@ def predict_card(history: pd.DataFrame, card: pd.DataFrame, model: BaneiModel,
     """card: status='entry' の出馬表 (odds_win は締切直前の値を入れるほど良い)."""
     rule = rule or BetRule()
     card = card.copy()
-    card["status"] = "entry"
+    if "status" in card:
+        card["status"] = card["status"].where(card["status"].eq("scratch"), "entry")
+    else:
+        card["status"] = "entry"
     hist = history[history["date"] < card["date"].min()]
     allx = pd.concat([hist, card], ignore_index=True)
     X = build_features(allx)
     X = X[X["status"] == "entry"]
+    debut = float((X["h_n_runs"] == 0).mean()) if len(X) else 0.0
+    if debut > 0.5:
+        print(f"⚠ 出馬表の {debut:.0%} が『過去出走なし』扱いです。過去データと出馬表で馬IDの体系が"
+              "違う可能性があります (取得元を揃えてください)。この状態の予測はほぼ市場オッズと同じになります。")
     P = model.predict(X)
     P["ev"] = P["p_model"] * P["odds_win"]
     P["edge"] = P["p_model"] / P["p_mkt"] - 1
     P["p_top3"] = np.nan
+    P["p_place"] = np.nan
     for rid, g in P.groupby("race_id"):
         P.loc[g.index, "p_top3"] = harville_top3(g["p_model"].to_numpy())
+        P.loc[g.index, "p_place"] = place_prob(g["p_model"].to_numpy())
     P["fair_odds"] = 1.0 / P["p_model"]
     # 複勝: オッズは幅で出るので下限で保守的に評価 (Harville は穴馬の複勝率をやや過大評価しがち)
     if "place_min" in P:
-        P["ev_place"] = P["p_top3"] * P["place_min"]
+        P["ev_place"] = P["p_place"] * P["place_min"]
     chosen = rule.select(P) if P["odds_win"].notna().any() else P.iloc[0:0]
     P["bet"] = P.index.isin(chosen.index)
     f = kelly_fraction * (P["ev"] - 1) / (P["odds_win"] - 1)
@@ -58,7 +67,7 @@ def explain(P: pd.DataFrame, model: BaneiModel, k_pos: int = 3, k_neg: int = 2) 
 DISPLAY = [
     ("race_no", "R"), ("post", "馬番"), ("horse_name", "馬名"), ("jockey_name", "騎手"),
     ("carried_weight", "負担重量"), ("odds_win", "単勝"), ("p_mkt", "市場確率"),
-    ("p_fund", "能力確率"), ("p_model", "AI勝率"), ("p_top3", "AI複勝率"),
+    ("p_fund", "能力確率"), ("p_model", "AI勝率"), ("p_top3", "AI3着内率"),
     ("edge", "歪み"), ("ev", "期待値"), ("fair_odds", "適正オッズ"),
     ("place_min", "複勝下限"), ("ev_place", "複勝期待値"),
     ("h_rating", "馬レート"), ("j_win_ae", "騎手力"), ("h_moist_apt", "水分適性"),
@@ -70,7 +79,7 @@ DISPLAY = [
 def format_table(P: pd.DataFrame) -> pd.DataFrame:
     cols = [c for c, _ in DISPLAY if c in P]
     t = P[cols].rename(columns=dict(DISPLAY)).copy()
-    for c in ["市場確率", "能力確率", "AI勝率", "AI複勝率", "歪み"]:
+    for c in ["市場確率", "能力確率", "AI勝率", "AI3着内率", "歪み"]:
         if c in t:
             t[c] = (t[c] * 100).round(1)
     for c in ["期待値", "複勝期待値", "騎手力", "水分適性"]:

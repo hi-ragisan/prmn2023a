@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 
 import numpy as np
 import pandas as pd
@@ -57,10 +58,24 @@ def parse_time_to_sec(v) -> float:
         return np.nan
 
 
+ID_COLS = ["race_id", "horse_id", "jockey_id", "trainer_id"]
+
+
+def read_csv(path, **kw) -> pd.DataFrame:
+    """ID 列 (先頭ゼロあり) を必ず文字列で読む."""
+    return pd.read_csv(path, dtype={c: str for c in ID_COLS}, **kw)
+
+
+def norm_num_text(v) -> str:
+    """全角数字・各種マイナス記号 (− U+2212, － U+FF0D) を半角に."""
+    s = unicodedata.normalize("NFKC", str(v))
+    return s.replace("\u2212", "-").replace("\u2012", "-").replace("\u2013", "-")
+
+
 def to_float(v) -> float:
     if v is None:
         return np.nan
-    s = str(v).strip().replace(",", "")
+    s = norm_num_text(v).strip().replace(",", "")
     m = re.search(r"-?\d+(?:\.\d+)?", s)
     return float(m.group(0)) if m else np.nan
 
@@ -82,6 +97,7 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = df[col].astype("string")
     if df["trainer_id"].isna().all():
         df["trainer_id"] = "unknown"
+    df["jockey_id"] = df["jockey_id"].fillna("unknown")
     df["race_id"] = df["race_id"].astype(str)
     df["status"] = df["status"].fillna("ok")
     df = df[ALL + [c for c in df.columns if c not in ALL]]

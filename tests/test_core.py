@@ -109,3 +109,25 @@ def test_bet_rule_selection():
     assert sorted(zip(b["race_id"], b["odds_win"])) == [("a", 5.0), ("b", 4.0)]
     r = backtest.flat_bet(b)
     assert r["roi"] == pytest.approx((5.0 + 4.0) / 2)
+
+
+def test_partial_odds_race_sums_to_one():
+    """一部の馬にオッズが無いレースでも確率の合計は 1."""
+    from banei_ai.model import Stage2
+
+    rng = np.random.default_rng(0)
+    rows = []
+    for r in range(300):
+        n = 8
+        s1 = rng.normal(size=n)
+        p = np.exp(s1) / np.exp(s1).sum()
+        w = rng.choice(n, p=p)
+        for i in range(n):
+            rows.append({"race_id": f"r{r}", "s1": s1[i], "p_mkt": p[i], "log_p_mkt": np.log(p[i]),
+                         "win": int(i == w), "j_popularity": 1.0, "h_last_pmkt_share": 1.0})
+    d = pd.DataFrame(rows)
+    s2 = Stage2().fit(d)
+    test = d[d["race_id"] == "r0"].copy()
+    test.loc[test.index[0], ["p_mkt", "log_p_mkt"]] = np.nan
+    out = s2.predict(test)
+    assert out["p_model"].sum() == pytest.approx(1.0)

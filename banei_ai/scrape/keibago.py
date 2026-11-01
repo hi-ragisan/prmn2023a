@@ -138,7 +138,7 @@ def scrape_card(date: pd.Timestamp, rn: int, f: Fetcher | None = None) -> pd.Dat
     t["race_no"] = rn
     t["moisture"] = find_moisture(html)
     t["race_class"] = find_race_class(html)
-    t["status"] = "entry"
+    t["status"] = t["status"].where(t["status"].eq("scratch"), "entry")
     t["finish"] = np.nan
     t["time_sec"] = np.nan
     try:

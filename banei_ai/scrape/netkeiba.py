@@ -31,9 +31,9 @@ def parse_result(html: str, rid: str, date: pd.Timestamp, race_no: int) -> pd.Da
     if t is None or t.empty:
         return None
     t = clean_entries(t)
-    horses = link_ids(html, r"/horse/(\w+)")
-    jockeys = link_ids(html, r"/jockey/(?:result/recent/|)(\w+)")
-    trainers = link_ids(html, r"/trainer/(?:result/recent/|)(\w+)")
+    horses = link_ids(html, r"/horse/(?!ped|result|top|search)(\w+)")
+    jockeys = link_ids(html, r"/jockey/(?:result/recent/)?(?!result|profile|search)(\w+)")
+    trainers = link_ids(html, r"/trainer/(?:result/recent/)?(?!result|profile|search)(\w+)")
     t["horse_id"] = t["horse_name"].map(horses).fillna(t["horse_name"])
     t["jockey_id"] = t["jockey_name"].map(jockeys).fillna(t["jockey_name"])
     if "trainer_name" in t:
@@ -91,6 +91,6 @@ def scrape_card(date: pd.Timestamp, race_no: int, fetcher: Fetcher | None = None
     html = fetcher.get(shutuba_url(rid), use_cache=False)
     t = parse_result(html, rid, date, race_no)
     if t is not None:
-        t["status"] = "entry"
+        t["status"] = t["status"].where(t["status"].eq("scratch"), "entry")
         t["finish"] = np.nan
     return t

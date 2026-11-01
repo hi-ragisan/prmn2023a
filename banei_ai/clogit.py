@@ -109,6 +109,27 @@ def race_logloss(p: np.ndarray, y: np.ndarray, race_ids: np.ndarray) -> float:
     return float(s.mean())
 
 
+def harville_top2(p: np.ndarray) -> np.ndarray:
+    """Harville 式で 2 着以内確率."""
+    p = np.asarray(p, dtype=float)
+    if len(p) <= 2:
+        return np.ones(len(p))
+    out = p.copy()
+    for i in range(len(p)):
+        for j in range(len(p)):
+            if j != i and p[j] < 1:
+                out[i] += p[j] * p[i] / (1 - p[j])
+    return np.clip(out, 0, 1)
+
+
+def place_prob(p: np.ndarray) -> np.ndarray:
+    """複勝が的中する確率. 8 頭以上: 3 着以内 / 5〜7 頭: 2 着以内 / 4 頭以下: 発売なし (NaN)."""
+    n = len(p)
+    if n <= 4:
+        return np.full(n, np.nan)
+    return harville_top3(p) if n >= 8 else harville_top2(p)
+
+
 def harville_top3(p: np.ndarray) -> np.ndarray:
     """Harville 式で 3 着以内確率を計算 (複勝の期待値用)."""
     p = np.asarray(p, dtype=float)

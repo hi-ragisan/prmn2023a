@@ -24,9 +24,8 @@ def add_market_probs(df: pd.DataFrame) -> pd.DataFrame:
     if "popularity" in out:
         miss = out["popularity"].isna() & out["odds_win"].notna()
         if miss.any():
-            out.loc[miss, "popularity"] = out[miss].groupby("race_id")["odds_win"].rank(
-                method="min"
-            )
+            full_rank = out.groupby("race_id")["odds_win"].rank(method="min")
+            out.loc[miss, "popularity"] = full_rank[miss]
     return out
 
 
@@ -87,7 +86,8 @@ def fit_power_calibration(df: pd.DataFrame) -> float:
     α > 1: 本命が過小評価・大穴が過大評価 (典型的な favorite-longshot bias)
     α < 1: 逆
     """
-    d = df[df["p_mkt"].notna()].sort_values("race_id")
+    d = df[df["p_mkt"].notna()]
+    d = d[d.groupby("race_id")["win"].transform("sum") > 0].sort_values("race_id")
     lp = d["log_p_mkt"].to_numpy()
     w = d["win"].to_numpy()
     _, starts = np.unique(d["race_id"].to_numpy(), return_index=True)

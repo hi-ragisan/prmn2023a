@@ -59,7 +59,7 @@ class Fetcher:
 
 # 見出し語 → 正規列名 (上から順に判定。「馬番」は「枠」より先に見る)
 HEADER_RULES: list[tuple[str, list[str]]] = [
-    ("finish", ["着順", "着"]),
+    ("finish", ["着順", "着", "順位"]),
     ("post", ["馬番"]),
     ("frame", ["枠"]),
     ("horse_name", ["馬名"]),
@@ -167,18 +167,27 @@ def find_moisture(html: str) -> float:
     return np.nan
 
 
+_CLASS_RX = re.compile(r"(?<![A-Za-z0-9])(A1|A2|B1|B2|B3|B4|C1|C2|OP)(?![0-9])|(オープン)")
+# レース名・条件が書かれていそうな要素 (ページ全体だとナビの他レース名を拾うため先に見る)
+_HEADER_SELECTORS = ".RaceName, .RaceData02, .RaceList_Item02, .raceTitle, .race_title, h1, h2, h3, h4, title"
+
+
 def find_race_class(html: str) -> str | None:
     from bs4 import BeautifulSoup
 
-    text = BeautifulSoup(html, "lxml").get_text(" ")
-    text = text.translate(str.maketrans("ＡＢＣ０１２３４５６７８９－", "ABC0123456789-"))
-    m = re.search(r"\b(A1|A2|B1|B2|B3|B4|C1|C2|オープン|OP)[-\s]?\d*", text)
-    if m:
-        return m.group(1)
-    if "重賞" in text or "記念" in text:
-        return "重賞"
-    m = re.search(r"([23])歳", text)
-    return f"{m.group(1)}歳" if m else None
+    soup = BeautifulSoup(html, "lxml")
+    texts = [el.get_text(" ") for el in soup.select(_HEADER_SELECTORS)] + [soup.get_text(" ")]
+    for text in texts:
+        text = schema.norm_num_text(text)
+        m = _CLASS_RX.search(text)
+        if m:
+            return m.group(1) or "オープン"
+        if "重賞" in text or "記念" in text:
+            return "重賞"
+        m = re.search(r"([23])歳", text)
+        if m:
+            return f"{m.group(1)}歳"
+    return None
 
 
 def clean_entries(t: pd.DataFrame) -> pd.DataFrame:
@@ -206,10 +215,10 @@ def clean_entries(t: pd.DataFrame) -> pd.DataFrame:
     if "carried_weight" in t:
         t["carried_weight"] = t["carried_weight"].map(schema.to_float)
     if "horse_weight" in t:
-        hw = t["horse_weight"].astype(str)
+        hw = t["horse_weight"].map(schema.norm_num_text)
         if "horse_weight_diff" not in t:
             t["horse_weight_diff"] = pd.to_numeric(
-                hw.str.extract(r"\(([+\-−]?\d+)\)")[0].str.replace("−", "-"), errors="coerce")
+                hw.str.extract(r"\(([+\-]?\d+)\)")[0], errors="coerce")
         else:
             t["horse_weight_diff"] = t["horse_weight_diff"].map(schema.to_float)
         t["horse_weight"] = pd.to_numeric(hw.str.extract(r"(\d{3,4})")[0], errors="coerce")

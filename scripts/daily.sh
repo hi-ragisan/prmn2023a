@@ -11,4 +11,5 @@ python -m banei_ai.cli update
 if [ "$(date +%u)" = "1" ] || [ ! -f data/models/model.pkl ]; then
   python -m banei_ai.cli train
 fi
-python -m banei_ai.cli predict --date "$(date +%Y-%m-%d)" "$@"
+# 出馬表の取得元は過去データと同じ netkeiba (ID 体系を揃えるため)。オッズは公式サイトから結合
+python -m banei_ai.cli predict --date "$(date +%Y-%m-%d)" --card-source netkeiba "$@"

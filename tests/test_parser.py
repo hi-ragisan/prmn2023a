@@ -71,3 +71,35 @@ def test_import_japanese_csv():
     assert r.loc[1, "jockey_id"] == "山田" and r.loc[1, "age"] == 4
     assert r.loc[1, "time_sec"] == pytest.approx(110.2) and r.loc[1, "horse_weight_diff"] == 4
     assert df["moisture"].iloc[0] == pytest.approx(2.4) and df["race_id"].iloc[0] == "2026010305"
+
+
+def test_review_regressions():
+    """レビューで見つかった不具合の再発防止."""
+    import numpy as np
+
+    from banei_ai import market, schema
+    from banei_ai.clogit import harville_top2, place_prob
+    from banei_ai.scrape.common import find_race_class
+
+    # 各種マイナス記号・全角
+    assert schema.to_float("−12") == -12 and schema.to_float("－８") == -8 and schema.to_float("＋6") == 6
+    # 日本語に挟まれたクラス名・オープン
+    assert find_race_class("<h2>混合A1-1組</h2>") == "A1"
+    assert find_race_class("<h2>ばんえいオープン</h2>") == "オープン"
+    # 欠けた人気はレース全体で順位付け
+    d = pd.DataFrame({"race_id": ["r"] * 4, "odds_win": [2.0, 3.0, 5.0, 9.0], "popularity": [1, 2, np.nan, np.nan]})
+    assert market.add_market_probs(d)["popularity"].tolist() == [1, 2, 3, 4]
+    # 複勝: 7 頭以下は 2 着まで
+    p = np.array([0.3, 0.2, 0.15, 0.15, 0.1, 0.1])
+    assert place_prob(p).sum() == pytest.approx(2.0)
+    assert harville_top2(p).sum() == pytest.approx(2.0)
+    assert np.isnan(place_prob(p[:4])).all()
+
+
+def test_ids_keep_leading_zeros(tmp_path):
+    from banei_ai import schema
+
+    f = tmp_path / "x.csv"
+    pd.DataFrame({"race_id": ["2024010101"], "jockey_id": ["05385"], "trainer_id": ["01001"]}).to_csv(f, index=False)
+    d = schema.read_csv(f)
+    assert d.loc[0, "jockey_id"] == "05385" and d.loc[0, "trainer_id"] == "01001"
