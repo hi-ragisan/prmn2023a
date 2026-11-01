@@ -58,6 +58,8 @@ class Stage1:
 
     def fit(self, d: pd.DataFrame) -> "Stage1":
         d = d.sort_values(["date", "race_id"])
+        # データに無い列 (例: タイムが無いデータのスピード指数) は使わない
+        self.features = [c for c in self.features if c in d.columns and d[c].notna().any()]
         X = d[self.features].astype(float)
         if lgb is None:
             self.fallback = ConditionalLogit(l2=1e-2).fit(X, d["win"], d["race_id"], self.features)
@@ -68,7 +70,7 @@ class Stage1:
         return self
 
     def score(self, d: pd.DataFrame) -> np.ndarray:
-        X = d[self.features].astype(float)
+        X = d.reindex(columns=self.features).astype(float)
         if self.booster is None:
             return self.fallback.utility(X)
         return self.booster.predict(X)

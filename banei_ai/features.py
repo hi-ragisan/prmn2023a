@@ -88,6 +88,8 @@ class HorseRun:
     cls: float
     jockey: str
     perf: float         # 0.5 - pct (大きいほど良い)
+    time: float = np.nan    # 走破タイム (秒)
+    moist: float = np.nan   # 馬場水分
 
 
 @dataclass
@@ -118,6 +120,50 @@ def _elo_update(ratings: np.ndarray, finish: np.ndarray, k: float = 24.0) -> np.
     np.fill_diagonal(e, 0)
     np.fill_diagonal(s, 0)
     return k * (s - e).sum(axis=1) / (n - 1)
+
+
+class TimeBaseline:
+    """走破タイムの基準 = f(馬場水分, 負担重量) を過去データだけで逐次推定 (リッジ回帰).
+
+    スピード指数 = 基準タイム - 実タイム (秒)。正なら基準より速い。
+    クラスは説明変数に入れない (上級馬が速いことを指数に残すため)。
+    """
+
+    def __init__(self, lam: float = 1.0):
+        self.k = 6
+        self.xtx = np.eye(self.k) * lam
+        self.xty = np.zeros(self.k)
+        self.beta = np.zeros(self.k)
+        self.n = 0
+
+    @staticmethod
+    def design(moist, cw) -> np.ndarray:
+        m = np.nan_to_num(np.asarray(moist, dtype=float), nan=2.0)
+        m = np.clip(m, 0, 12)
+        w = (np.asarray(cw, dtype=float) - 650.0) / 100.0
+        w = np.nan_to_num(w, nan=0.0)
+        return np.column_stack([np.ones_like(m), m, m ** 2, np.log1p(m), w, w * m])
+
+    def add(self, moist, cw, time) -> None:
+        t = np.asarray(time, dtype=float)
+        ok = np.isfinite(t)
+        if not ok.any():
+            return
+        X = self.design(np.asarray(moist)[ok], np.asarray(cw)[ok])
+        # 障害で止まった極端な遅いタイムは基準推定から外す
+        self.xtx += X.T @ X
+        self.xty += X.T @ t[ok]
+        self.n += int(ok.sum())
+
+    def refit(self) -> None:
+        if self.n >= 50:
+            self.beta = np.linalg.solve(self.xtx, self.xty)
+
+    def speed(self, moist, cw, time) -> np.ndarray:
+        if self.n < 50:
+            return np.full(np.shape(np.atleast_1d(time)), np.nan)
+        pred = self.design(np.atleast_1d(moist), np.atleast_1d(cw)) @ self.beta
+        return np.clip(pred - np.atleast_1d(np.asarray(time, dtype=float)), -40, 40)
 
 
 def prepare(df: pd.DataFrame) -> pd.DataFrame:
@@ -153,6 +199,7 @@ def build_features(df: pd.DataFrame, upto_results: bool = True) -> pd.DataFrame:
     jockeys: dict[str, Decayed] = {}
     trainers: dict[str, Decayed] = {}
     combo: dict[tuple[str, str], np.ndarray] = defaultdict(lambda: np.zeros(3))
+    tb = TimeBaseline()
 
     def jget(key: str, t) -> np.ndarray:
         if key not in jockeys:
@@ -200,6 +247,17 @@ def build_features(df: pd.DataFrame, upto_results: bool = True) -> pd.DataFrame:
                 if pm:
                     f["h_mkt_ae"] = _beta_shrink(sum(a for a, _ in pm), sum(b for _, b in pm), 1.5)
                     f["h_last_pmkt_share"] = runs[-1].p_mkt * runs[-1].n
+                # スピード指数 (水分・負担重量補正タイム)。現時点の基準で過去走を再評価
+                tms = np.array([x.time for x in runs[-8:]])
+                if np.isfinite(tms).any():
+                    spd = tb.speed([x.moist for x in runs[-8:]], [x.cw for x in runs[-8:]], tms)
+                    ok = np.isfinite(tms)
+                    sp = spd[ok]
+                    ww = w[-8:][ok]
+                    f["h_spd_last"] = sp[-1]
+                    f["h_spd_avg3"] = sp[-3:].mean()
+                    f["h_spd_best5"] = sp[-5:].max()
+                    f["h_spd_ewm"] = float((sp * ww).sum() / ww.sum())
                 f["h_cw_change"] = r.carried_weight - last.cw
                 f["h_cls_change"] = r.class_rank - last.cls if not np.isnan(last.cls) else np.nan
                 f["h_jockey_change"] = float(r.jockey_id != last.jockey)
@@ -254,6 +312,8 @@ def build_features(df: pd.DataFrame, upto_results: bool = True) -> pd.DataFrame:
                     moist_bin=int(row.moist_bin), p_mkt=float(row.p_mkt),
                     n=int(row.n_runners), cls=float(row.class_rank),
                     jockey=str(row.jockey_id), perf=0.5 - pct,
+                    time=float(row.time_sec) if row.status == "ok" else np.nan,
+                    moist=float(row.moisture),
                 ))
                 n = float(row.n_runners)
                 has_odds = not np.isnan(row.p_mkt)
@@ -270,6 +330,10 @@ def build_features(df: pd.DataFrame, upto_results: bool = True) -> pd.DataFrame:
                 trainers[str(row.trainer_id)].add(date, vec)
                 cv = combo[(row.jockey_id, row.horse_id)]
                 cv += np.array([1.0, row.win, 1.0 / n])
+            ok = race["status"].eq("ok").to_numpy()
+            tb.add(race["moisture"].to_numpy()[ok], race["carried_weight"].to_numpy()[ok],
+                   race["time_sec"].to_numpy()[ok])
+        tb.refit()
 
     F = pd.DataFrame(feats)
     F = F.drop(columns=["_idx"])
@@ -280,7 +344,7 @@ def build_features(df: pd.DataFrame, upto_results: bool = True) -> pd.DataFrame:
 
 REL_COLS = [
     "h_rating", "h_ewm_pct", "h_avg3_gap", "h_win_ae", "j_win_ae", "j_top3_ae",
-    "h_moist_apt", "t_win_ae", "h_best5_gap",
+    "h_moist_apt", "t_win_ae", "h_best5_gap", "h_spd_ewm", "h_spd_best5",
 ]
 
 
@@ -306,6 +370,7 @@ FUNDAMENTAL_FEATURES = [
     "h_avg5_pct", "h_ewm_pct", "h_last_gap", "h_avg3_gap", "h_best5_gap",
     "h_win_ae", "h_top3_rate", "h_cw_change", "h_cls_change", "h_jockey_change",
     "h_moist_apt", "h_moist_n", "h_heavy_perf",
+    "h_spd_last", "h_spd_avg3", "h_spd_best5", "h_spd_ewm",
     "j_rides", "j_win_ae", "j_top3_ae", "t_win_ae",
     "jh_rides", "jh_win_ae",
     "r_cw_rank",
