@@ -93,6 +93,8 @@ python -m banei_ai.cli scrape --start 2026-10-01 --end 2026-10-31 --source keiba
   多少のレイアウト差には耐えますが、まず `--check` で1か月分の中身（特に `moisture`=馬場水分、
   `odds_win`、`horse_id`）が埋まっているか確認してください。
   ずれていたら `banei_ai/scrape/common.py` の `HEADER_RULES` / `find_moisture` を調整します。
+- 場コードは `banei_ai/config.py` にあります（netkeiba の帯広ばんえい = `65`、keiba.go.jp の `k_babaCode` = `3`）。
+  1日分取得して 0 レースになる場合は、ブラウザで該当ページの URL を確認してここを直してください。
 
 日々の運用では、データの最終日から昨日までを追加取得できます:
 
