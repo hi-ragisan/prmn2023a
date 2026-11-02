@@ -46,7 +46,9 @@ class ConditionalLogit:
         Z = (X - self.mean_) / self.scale_
         return np.nan_to_num(Z, nan=0.0)  # 欠損 = 平均
 
-    def fit(self, X, y, race_ids, columns: list[str] | None = None) -> "ConditionalLogit":
+    def fit(self, X, y, race_ids, columns: list[str] | None = None,
+            weights=None) -> "ConditionalLogit":
+        """weights: 行ごとの重み (同じレース内は同じ値。レースの先頭行の値を使う)。省略時は全レース 1."""
         race_ids = np.asarray(race_ids)
         order = np.argsort(race_ids, kind="stable")
         Z = self._prep(np.asarray(X)[order], fit=True)
@@ -61,6 +63,10 @@ class ConditionalLogit:
         ysum = np.repeat(np.add.reduceat(y, starts), lens)
         y = y / ysum
         n_races = len(starts)
+        if weights is not None:
+            w_race = np.asarray(weights, dtype=float)[order][keep][starts]
+            w_row = np.repeat(w_race, lens)
+            w_tot = float(w_race.sum())
 
         def f(b):
             u = Z @ b
@@ -68,9 +74,13 @@ class ConditionalLogit:
             e = np.exp(u - np.repeat(m, lens))
             s = np.add.reduceat(e, starts)
             lse = np.log(s) + m
-            nll = -(y @ u - lse.sum()) / n_races + 0.5 * self.l2 * b @ b
             p = e / np.repeat(s, lens)
-            g = -(Z.T @ (y - p)) / n_races + self.l2 * b
+            if weights is None:  # 従来と完全に同じ計算
+                nll = -(y @ u - lse.sum()) / n_races + 0.5 * self.l2 * b @ b
+                g = -(Z.T @ (y - p)) / n_races + self.l2 * b
+            else:
+                nll = -((w_row * y) @ u - w_race @ lse) / w_tot + 0.5 * self.l2 * b @ b
+                g = -(Z.T @ (w_row * (y - p))) / w_tot + self.l2 * b
             return nll, g
 
         b0 = np.zeros(Z.shape[1])
