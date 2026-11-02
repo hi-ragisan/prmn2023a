@@ -402,7 +402,7 @@ def _fetch_card(date: pd.Timestamp, rn: int, source: str, wait: float) -> pd.Dat
         return keibago.scrape_card(date, rn, keibago.Fetcher(wait=wait))
     from .scrape import netkeiba
 
-    t = netkeiba.scrape_card(date, rn, netkeiba.Fetcher(encoding="euc-jp", wait=wait))
+    t = netkeiba.scrape_card(date, rn, netkeiba.Fetcher(wait=wait))
     if t is None:
         return None
     try:
