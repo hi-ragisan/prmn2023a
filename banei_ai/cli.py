@@ -8,6 +8,7 @@
   python -m banei_ai.cli report                       騎手・馬の良し悪し + 歪みの棚卸し
   python -m banei_ai.cli train                        本番モデルを学習して保存
   python -m banei_ai.cli predict --date 2026-11-02    当日の出馬表を取得して予測
+  python -m banei_ai.cli dashboard --data ...         結果の HTML ダッシュボード
 """
 from __future__ import annotations
 
@@ -417,6 +418,14 @@ def _fetch_card(date: pd.Timestamp, rn: int, source: str, wait: float) -> pd.Dat
 
 
 def main(argv=None):
+    import sys
+
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv and argv[0] == "dashboard":
+        # 引数はそのまま banei_ai.dashboard に渡す (python -m banei_ai.dashboard と同じ)
+        from .dashboard import main as dashboard_main
+
+        return dashboard_main(argv[1:])
     ap = argparse.ArgumentParser(prog="banei_ai", description="ばんえい競馬 予測AI")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -481,6 +490,8 @@ def main(argv=None):
     s.add_argument("--bankroll", type=float, default=100_000)
     s.add_argument("--wait", type=float, default=1.0)
     s.set_defaults(fn=cmd_predict)
+
+    sub.add_parser("dashboard", help="結果の HTML ダッシュボード (詳細: dashboard --help)")
 
     a = ap.parse_args(argv)
     a.fn(a)
