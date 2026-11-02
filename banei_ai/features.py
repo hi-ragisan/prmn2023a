@@ -260,6 +260,10 @@ def build_features(df: pd.DataFrame, upto_results: bool = True) -> pd.DataFrame:
                     f["h_spd_best5"] = sp[-5:].max()
                     f["h_spd_ewm"] = float((sp * ww).sum() / ww.sum())
                 f["h_cw_change"] = r.carried_weight - last.cw
+                # レース内相対の重量の前走比。実際のばんえいは基礎重量が開催回ごとに約 10kg ずつ
+                # 上がる (年度初めに戻る) ので、生の重量差 h_cw_change には季節の要因が混ざる。
+                # レース平均との差どうしを比べれば季節の上下が打ち消され、ハンデの見直しだけが残る。
+                f["h_cw_rel_change"] = r.cw_rel - last.cw_rel
                 f["h_cls_change"] = r.class_rank - last.cls if not np.isnan(last.cls) else np.nan
                 f["h_jockey_change"] = float(str(r.jockey_id) != last.jockey)
                 # 馬場水分適性: 同じ水分帯での成績 - 全体平均 (縮小)
@@ -387,7 +391,11 @@ FUNDAMENTAL_FEATURES = [
     "j_rides", "j_win_ae", "j_top3_ae", "j_moist_rel", "t_win_ae",
     "jh_rides", "jh_win_ae",
     "r_cw_rank",
-] + [f"r_{c}_{k}" for c in REL_COLS for k in ("diff", "rank")]
+] + [f"r_{c}_{k}" for c in REL_COLS for k in ("diff", "rank")] + [
+    # 季節に頑健な重量の前走比 (docs/model_experiments.md の (f))。
+    # 評価したときと同じ列順にするため末尾に置く (LightGBM の feature_fraction は列順に依存する)
+    "h_cw_rel_change",
+]
 
 # 市場との関係を表す特徴量 (Stage2 / 歪み分析で使用。Stage1 には入れない)
 MARKET_FEATURES = [
@@ -404,7 +412,8 @@ FEATURE_LABELS = {
     "h_last1_pct": "前走着順", "h_last2_pct": "2走前着順", "h_last3_pct": "3走前着順",
     "h_avg5_pct": "近5走着順", "h_ewm_pct": "近走着順(加重)", "h_last_gap": "前走着差",
     "h_avg3_gap": "近3走着差", "h_best5_gap": "近5走最小着差", "h_win_ae": "馬の勝率",
-    "h_top3_rate": "馬の複勝率", "h_cw_change": "負担重量の前走比", "h_cls_change": "クラス昇降",
+    "h_top3_rate": "馬の複勝率", "h_cw_change": "負担重量の前走比",
+    "h_cw_rel_change": "負担重量の前走比(レース内相対)", "h_cls_change": "クラス昇降",
     "h_jockey_change": "乗り替わり", "h_moist_apt": "馬場水分適性", "h_moist_n": "同水分帯経験",
     "h_heavy_perf": "重い斤量での成績", "h_spd_last": "前走スピード指数",
     "h_spd_avg3": "近3走スピード指数", "h_spd_best5": "近5走最高スピード指数",
@@ -428,7 +437,7 @@ def feature_label(name: str) -> str:
 # 要因説明のグループ (関連する特徴量をまとめて「何が効いているか」を読みやすくする)
 EXPLAIN_GROUPS = [
     ("負担重量", ["carried_weight", "cw_rel", "cw_ratio", "cw"]),
-    ("斤量の前走比", ["h_cw_change"]),
+    ("斤量の前走比", ["h_cw_change", "h_cw_rel_change"]),
     ("重い斤量での実績", ["h_heavy_perf"]),
     ("馬齢", ["age", "age_rel"]),
     ("騎手の腕", ["j_win_ae", "j_top3_ae", "j_rides"]),
