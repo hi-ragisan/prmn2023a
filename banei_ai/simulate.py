@@ -169,6 +169,7 @@ def _moisture_for(day: pd.Timestamp, rng: np.random.Generator,
 
 STOP_PENALTY = (0.8, 2.5)  # 第2障害で止まったときの減速 (一様分布の範囲)
 _GL_X, _GL_W = np.polynomial.legendre.leggauss(8)
+_trapezoid = getattr(np, "trapezoid", None) or np.trapz  # numpy < 2.0 互換
 
 
 def win_probs_with_stops(s: np.ndarray, noise_scale: float, stop_prob: float,
@@ -182,27 +183,27 @@ def win_probs_with_stops(s: np.ndarray, noise_scale: float, stop_prob: float,
     s = np.asarray(s, dtype=float)
     one = s.ndim == 1
     S = s[None, :] if one else s
-    b = noise_scale
-    a_, b_ = STOP_PENALTY
-    shifts = np.r_[0.0, a_ + (b_ - a_) * (_GL_X + 1) / 2]           # (K,)
+    beta = noise_scale
+    lo, hi = STOP_PENALTY
+    shifts = np.r_[0.0, lo + (hi - lo) * (_GL_X + 1) / 2]           # (K,)
     weights = np.r_[1.0 - stop_prob, stop_prob * _GL_W / 2]          # (K,) 合計 1
-    t = np.linspace(-b_ - 5 * b, 14 * b, n_grid)                     # 最強馬の位置からの相対グリッド
+    t = np.linspace(-hi - 5 * beta, 14 * beta, n_grid)                     # 最強馬の位置からの相対グリッド
     out = np.empty_like(S)
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
         for i0 in range(0, len(S), chunk):
             Sc = S[i0:i0 + chunk]
-            top = np.max(np.where(np.isfinite(Sc), Sc, -np.inf), axis=1)
+            top = np.max(Sc, axis=1)
             x = top[:, None] + t[None, :]                                          # (R, G)
-            z = (x[:, None, None, :] - Sc[:, :, None, None] + shifts[None, None, :, None]) / b
+            z = (x[:, None, None, :] - Sc[:, :, None, None] + shifts[None, None, :, None]) / beta
             e = np.exp(-z)                                                         # (R, n, K, G)
             F = np.einsum("rnkg,k->rng", np.exp(-e), weights)
-            f = np.einsum("rnkg,k->rng", np.exp(-z - e), weights) / b
+            f = np.einsum("rnkg,k->rng", np.exp(-z - e), weights) / beta
             f = np.nan_to_num(f)
             # Π_{j≠i} F_j を前後からの累積積で (F=0 があっても安全に)
             pre = np.cumprod(np.concatenate([np.ones_like(F[:, :1]), F[:, :-1]], axis=1), axis=1)
             suf = np.flip(np.cumprod(np.flip(np.concatenate([F[:, 1:], np.ones_like(F[:, :1])], axis=1),
                                              axis=1), axis=1), axis=1)
-            p = np.trapezoid(f * pre * suf, dx=t[1] - t[0], axis=2)
+            p = _trapezoid(f * pre * suf, dx=t[1] - t[0], axis=2)
             p = np.where(np.isfinite(Sc), p, 0.0)
             out[i0:i0 + chunk] = p / p.sum(axis=1, keepdims=True)
     return out[0] if one else out
