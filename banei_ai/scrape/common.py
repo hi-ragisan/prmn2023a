@@ -425,6 +425,25 @@ def find_race_name(html: str) -> str | None:
     return None
 
 
+def find_race_meta(html: str) -> dict:
+    """レースの付帯情報 (netkeiba .RaceData02): 1着本賞金 (万円)・出走条件.
+
+    netkeiba のばんえい成績ページには A1/B2 などのクラス名が無いが、1着賞金がクラスの高さをよく表す
+    (例: 下級 30万円 / 中級 34万円 / 上級 65万円 …)。特徴量では log(1着賞金) をクラスの指標に使う。
+    """
+    soup = _soup(html)
+    el = soup.select_one(".RaceData02")
+    text = re.sub(r"\s+", " ", el.get_text(" ")).strip() if el is not None else ""
+    out: dict = {"prize1": np.nan, "race_condition": None}
+    m = re.search(r"本賞金\s*[:：]\s*([\d.]+)", text)
+    if m:
+        out["prize1"] = float(m.group(1))
+    m = re.search(r"((?:混合|牝馬|牡馬)?\S*[2-9２-９]歳\S*)", text)
+    if m:
+        out["race_condition"] = schema.norm_num_text(m.group(1))
+    return out
+
+
 _DNF_RX = "中止|失格"
 _SCRATCH_RX = "取消|除外|停止"
 

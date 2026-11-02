@@ -18,7 +18,7 @@ import pandas as pd
 
 from .. import config
 from .common import (Fetcher, attach_ids, clean_entries, find_entry_table, find_moisture,
-                     find_race_class, find_race_name, link_ids)
+                     find_race_class, find_race_meta, find_race_name, link_ids)
 
 BASE = "https://nar.netkeiba.com"
 
@@ -56,6 +56,9 @@ def parse_result(html: str, rid: str, date: pd.Timestamp, race_no: int) -> pd.Da
     t["moisture"] = find_moisture(html)
     t["race_class"] = find_race_class(html)
     t["race_name"] = find_race_name(html)
+    meta = find_race_meta(html)
+    t["prize1"] = meta["prize1"]
+    t["race_condition"] = meta["race_condition"]
     return t
 
 

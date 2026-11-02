@@ -171,6 +171,10 @@ def prepare(df: pd.DataFrame) -> pd.DataFrame:
     d = schema.runners_only(schema.normalize(df))
     d = market.add_market_probs(d)
     d["class_rank"] = class_rank(d["race_class"])
+    # netkeiba のばんえいはクラス名が無い → 1着賞金 (万円) の対数をクラスの高さの指標にする
+    if "prize1" in d.columns:
+        p1 = pd.to_numeric(d["prize1"], errors="coerce")
+        d["class_rank"] = np.log(p1.where(p1 > 0)).where(p1.notna(), d["class_rank"])
     n = d["n_runners"]
     fin = d["finish"].where(d["status"] == "ok")
     # 中止は最下位扱い。出馬表 (status=entry, 結果未確定) は NaN のまま
