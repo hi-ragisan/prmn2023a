@@ -225,6 +225,7 @@ def section_summary(ctx: dict) -> str:
         raise _Skip(ctx.get("p_error") or "ウォークフォワード予測がありません")
     tiles, extra = [], []
     vs = np.nan
+    vs_cal = np.nan
     races = P["race_id"].nunique()
     tiles.append(_tile("評価レース数", f"{races:,}",
                        f"{P['date'].min():%Y-%m-%d}〜{P['date'].max():%Y-%m-%d} · 完全サンプル外"))
@@ -235,6 +236,8 @@ def section_summary(ctx: dict) -> str:
         ev = evaluate_probs(P)
         row = ev.set_index("model")
         vs = float(row.loc["合成モデル", "vs_market"])
+        if "市場 (較正後)" in row.index:
+            vs_cal = float(row.loc["市場 (較正後)", "logloss"] - row.loc["合成モデル", "logloss"])
         st = _status("good", "市場より良い") if vs > 0 else _status("bad", "市場に負けている")
         tiles.append(_tile("対数損失の改善 (市場比)", f"{vs:+.4f}",
                            f"合成 {row.loc['合成モデル', 'logloss']:.4f} / 市場 "
@@ -270,19 +273,33 @@ def section_summary(ctx: dict) -> str:
     else:
         tiles.append(_tile("前後半検証 (後半の回収率)", "—", "前半に十分な購入点数がありません (30点以上が必要)"))
     ctx["split"] = sh
+    # 本番投入の判断 (README「本番投入の判断基準」と同じ):
+    #   ① 合成モデルが「較正後の市場」より正確  ② それが四半期ごとに一貫している
+    #   ③ 回収率の区間は参考 (少ない点数では運で大きく振れるため判定には使わない。docs/robustness.md)
     verdict = ""
     try:
-        good_ll = not _isnan(vs) and vs > 0
-        good_sh = sh.get("chosen_min_ev") is not None and sh["second_half_roi_lo90"] > 1
-        if good_ll and good_sh:
-            verdict = _status("good", "本番投入の目安を満たしています (市場より良い確率 + 後半の回収率の区間下限 > 100%)")
-        else:
-            why = []
-            if not good_ll:
-                why.append("確率の精度が市場以下")
-            if not good_sh:
-                why.append("後半の回収率の区間下限が 100% 以下")
-            verdict = _status("warn", "本番投入の目安は未達: " + "・".join(why))
+        from .clogit import race_logloss
+
+        d = P[P["p_mkt"].notna() & P["p_mkt_cal"].notna()]
+        gains = []
+        for _, g in d.groupby(d["date"].dt.to_period("Q")):
+            if g["race_id"].nunique() >= 50:
+                gains.append(race_logloss(g["p_mkt_cal"], g["win"], g["race_id"])
+                             - race_logloss(g["p_model"], g["win"], g["race_id"]))
+        n_pos = sum(x > 0 for x in gains)
+        good_ll = not _isnan(vs_cal) and vs_cal > 0
+        good_cons = bool(gains) and n_pos / len(gains) >= 0.75
+        lines = [
+            f"{'✓' if good_ll else '✗'} ① 較正後の市場より正確: {vs_cal:+.4f}" if not _isnan(vs_cal)
+            else "✗ ① 較正後の市場と比較できません (オッズなし)",
+            f"{'✓' if good_cons else '✗'} ② 四半期ごとの一貫性: {n_pos}/{len(gains)} 期で較正後の市場より正確",
+        ]
+        if sh.get("chosen_min_ev") is not None:
+            lines.append(f"(参考) ③ 後半の回収率 {_pct(sh['second_half_roi'], 0)}・90%区間 "
+                         f"{_ci(sh['second_half_roi_lo90'], sh['second_half_roi_hi90'])} — 回収率は運で大きく振れるため判定には使いません")
+        head = ("本番投入の目安を満たしています" if good_ll and good_cons else "本番投入の目安は未達です")
+        verdict = _status("good" if good_ll and good_cons else "warn", head) + \
+            '<ul class="crit">' + "".join(f"<li>{esc(x)}</li>" for x in lines) + "</ul>"
     except Exception:  # noqa: BLE001
         pass
     return (f'<div class="verdict">{verdict}</div><div class="tiles">{"".join(tiles)}</div>' + "".join(extra))
@@ -1075,7 +1092,7 @@ border-radius:8px;padding:8px 12px;margin:8px 0}
 font-size:12px;font-weight:700;color:#fff;flex:none;transform:translateY(3px)}
 .st-good .ic{background:var(--good)}.st-warn .ic{background:var(--warn);color:#0b0b0b}
 .st-bad .ic{background:var(--bad)}.st-info .ic{background:var(--ink-3)}
-.verdict{margin:0 0 10px}.verdict .st{font-size:14px;margin:0}
+.verdict{margin:0 0 10px}.verdict .st{font-size:14px;margin:0}.verdict .crit{margin:6px 0 0;padding-left:1.2em;font-size:13px;line-height:1.6}
 svg.chart{display:block;width:100%;height:auto;max-width:520px;margin:0 auto;overflow:visible}
 .card.wide svg.chart{max-width:none}
 svg.chart.only-wide{display:none}
