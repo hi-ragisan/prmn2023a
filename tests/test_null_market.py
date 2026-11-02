@@ -1,24 +1,27 @@
 """帰無仮説の検証: 歪みのない市場で、パイプラインが「エッジ」をでっち上げないこと.
 
 SimConfig.preset("efficient") の市場は、真の強さ (モデルが見られない調教の気配なども含む) を
-完全に知り、実際の勝敗に対して較正した確率を付ける (埋め込んだ歪み 0, market_info_sd = 0)。
+完全に知り、第2障害での停止の偶然まで織り込んだ真の勝率そのもので値付けする
+(埋め込んだ歪み 0, market_info_sd = 0, market_stop_aware = True)。
 モデルの特徴量はすべて過去の結果から作る「真の強さの粗い代理」なので、市場に足せる情報は原理的にゼロ。
 よってパイプラインが正しければ
   1. 合成モデルの対数損失は、市場より意味のある幅で良くなってはいけない
   2. 期待値 ≥ 1.10 の賭けの回収率が「有意に 100% 超え」(90% 区間の下限 > 1) になってはいけない
   3. 選ばれた賭けの *真の* 期待値 (シミュレーションの真の勝率 × オッズ) は 1 を下回る (控除 20% → 約 0.8)
 
-しきい値の根拠 (scratch 実験: 2023-04〜2024-12, サンプル外 約 836 レース/シード, seed 3/42/7/11/5/1。
-※ すべて人工データ上の数値):
-  Δ対数損失 (市場 − 合成, 正 = モデルが良い): −0.0080〜+0.0001 (平均 −0.0031, シード間 sd 0.003)。
-      1 シード内のレース単位の標準誤差 ≈ 0.003〜0.004。しきい値 +0.005 は帰無分布の平均 +2.5sd 超で、
-      歪みを埋め込んだ既定の市場 (同じ seed 3) の +0.027 の 1/5 以下。
-  期待値 ≥ 1.10 の賭け: 0〜45 点/シード。90% 区間の下限は最大 0.85 (seed 42)、seed 3 は 0.22。
-      実現回収率は運に大きく振れる (seed 42 は 12 点で 251%、6 シード合算 68 点で 117%、9 勝 vs 真の期待 4.8 勝)。
-      このため「回収率の上限」ではなく「下限 < 1 (有意なエッジを主張しない)」と、運に左右されない
-      「真の期待値 < 1」で判定する。区間の上限は点数が少ないと 400% を超えることもあり判定に使えない。
-  選ばれた賭けの真の期待値: 0.73〜0.79 (モデル自身の見積もりは 1.14〜1.20 = 選択バイアス/勝者の呪い)。
-  リーク検査 (6 シード合算の条件付きロジット): 真の勝率を入れた上での s1 の追加係数 0.06 ± 0.05 (有意でない)。
+しきい値の根拠 (scripts/robustness.py --scales efficient --start 2023-04-01 --end 2024-12-31 で
+seed 3/42/7/11/5/1/101〜106 の 12 シード、サンプル外 約 836 レース/シード。※ すべて人工データ上の数値):
+  Δ対数損失 (市場 − 合成, 正 = モデルが良い): −0.0074〜+0.0043 (平均 −0.0026, シード間 sd 0.0031)。
+      較正後の市場との差も −0.0046〜+0.0047。1 シード内のレース単位の標準誤差 ≈ 0.003〜0.004 で、
+      市場 = 真の確率なのに +0.004 が出るシードもある (過学習の偶然)。しきい値 +0.006 は帰無分布の
+      平均 +2.7sd で、歪みを埋め込んだ既定の市場 (同じ seed 3) の +0.027 の 1/4 以下。
+  期待値 ≥ 1.10 の賭け: 0〜54 点/シード (12 シード計 85 点)。90% 区間の下限は最大 0.77 (seed 42)、seed 3 は 0.49。
+      実現回収率は運で大きく振れる: seed 42 は 13 点で 232%、seed 3 は 54 点で 166%、12 シード合算でも
+      約 165%。それでも真の期待値はどのシードも 0.79〜0.80 (モデル自身の見積もりは 1.11〜1.19 =
+      選択バイアス/勝者の呪い)。このため「回収率の上限」ではなく「区間の下限 < 1 (有意なエッジを主張
+      しない)」と、運に左右されない「真の期待値 < 1」で判定する。区間の上限は点数が少ないと 400〜500% を
+      超え、判定に使えない。
+  リーク検査 (12 シード合算の条件付きロジット): 真の勝率を入れた上での s1 の追加係数 0.001 ± 0.034。
 
 検出力の確認として、同じ seed で歪みを埋め込んだ既定の市場では Δ対数損失がはっきり正になることも見る
 (パイプラインが壊れて「常に市場をそのまま返す」状態でも帰無検定は通ってしまうため)。
@@ -31,13 +34,15 @@ from banei_ai import backtest as B
 from banei_ai import config, market
 from banei_ai.features import build_features, prepare
 from banei_ai.model import evaluate_probs, walk_forward
-from banei_ai.simulate import SimConfig, simulate
+from banei_ai.simulate import SimConfig, simulate, true_win_probs
 
 PERIOD = dict(start="2023-04-01", end="2024-12-31", seed=3)
 
 
-def _true_p(P: pd.DataFrame) -> pd.Series:
-    return P["_p_true"] / P.groupby("race_id")["_p_true"].transform("sum")
+def _true_ev(P: pd.DataFrame, bets: pd.DataFrame) -> float:
+    """選ばれた賭けの真の期待値 (停止込みの真の勝率 × オッズ の平均). 買ったレースだけ計算する."""
+    p = true_win_probs(P[P["race_id"].isin(bets["race_id"])]).loc[bets.index]
+    return float((p * bets["odds_win"]).mean())
 
 
 def _dll(P: pd.DataFrame) -> tuple[float, float]:
@@ -86,7 +91,7 @@ def test_efficient_market_is_calibrated_and_default_is_not():
     # 全馬を均等に買った回収率 ≈ 払戻率 (歪みが無ければどの馬も期待値 ≈ 0.8)
     assert 0.72 < (eff["win"] * eff["odds_win"]).mean() < 0.88
     # 効率的な市場では、どの馬も真の期待値 (真の勝率 × オッズ) は 1 未満
-    assert (_true_p(eff) * eff["odds_win"]).max() < 1.0
+    assert (true_win_probs(eff) * eff["odds_win"]).max() < 1.0
 
 
 def test_realistic_preset_matches_real_world_stats():
@@ -104,8 +109,8 @@ def test_realistic_preset_matches_real_world_stats():
 
 def test_null_market_no_logloss_edge(null_preds):
     d_mkt, d_cal = _dll(null_preds)
-    assert d_mkt < 0.005, f"効率的な市場に対して合成モデルが {d_mkt:+.4f} 良い (偽のエッジ?)"
-    assert d_cal < 0.005, f"較正後の市場に対して合成モデルが {d_cal:+.4f} 良い (偽のエッジ?)"
+    assert d_mkt < 0.006, f"効率的な市場に対して合成モデルが {d_mkt:+.4f} 良い (偽のエッジ?)"
+    assert d_cal < 0.006, f"較正後の市場に対して合成モデルが {d_cal:+.4f} 良い (偽のエッジ?)"
 
 
 def test_null_market_no_significant_roi(null_preds):
@@ -114,7 +119,7 @@ def test_null_market_no_significant_roi(null_preds):
         lo, hi = B.bootstrap_roi(bets)
         assert lo < 1.0, f"効率的な市場で回収率 90% 区間の下限が {lo:.2f} > 1 (偽のエッジ)"
         # 運に左右されない判定: 選ばれた賭けの真の期待値は 1 未満
-        true_ev = float((_true_p(null_preds)[bets.index] * bets["odds_win"]).mean())
+        true_ev = _true_ev(null_preds, bets)
         assert true_ev < 1.0
         # モデルは期待値 ≥ 1.1 と思って買っている → 真の期待値との差が選択バイアス
         assert bets["ev"].mean() > true_ev
@@ -126,11 +131,11 @@ def test_null_market_no_significant_roi(null_preds):
 def test_pipeline_detects_planted_distortions():
     """検出力: 同じ seed・期間で歪みを埋め込んだ既定の市場なら、はっきり市場に勝つ.
 
-    実測 (seed 3): Δ対数損失 vs 市場 +0.0270, vs 較正後の市場 +0.0103, 期待値 ≥ 1.1 が 159 点で真の期待値 1.11.
+    実測 (seed 3): Δ対数損失 vs 市場 +0.0270, vs 較正後の市場 +0.0103, 期待値 ≥ 1.1 が 159 点で真の期待値 1.10.
     """
     P = walk_forward(build_features(simulate(SimConfig(**PERIOD))), verbose=False)
     d_mkt, d_cal = _dll(P)
-    assert d_mkt > 0.015 and d_cal > 0.005  # 帰無のしきい値 0.005 を上回る
+    assert d_mkt > 0.015 and d_cal > 0.006  # 帰無のしきい値 0.006 を上回る
     bets = B.BetRule(min_ev=1.10).select(P)
     assert len(bets) > 50
-    assert float((_true_p(P)[bets.index] * bets["odds_win"]).mean()) > 1.0  # 本物のエッジ
+    assert _true_ev(P, bets) > 1.0  # 本物のエッジ

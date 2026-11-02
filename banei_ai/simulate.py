@@ -68,6 +68,9 @@ class SimConfig:
     d_weight_drop: float | None = None  # 5. 馬体重大幅減の軽視 (0 なら市場も織り込む)
     # d_flb = 0 のときの市場温度。None なら market_info_sd から自動計算 (calibrated_temp)。
     market_temp_calibrated: float | None = None
+    # True なら市場は停止の偶然まで厳密に織り込んだ勝率 (win_probs_with_stops) で値付けする。
+    # False (既定) は従来どおり softmax (停止は calibrated_temp の縮小で近似)。
+    market_stop_aware: bool = False
     payout_rate: float | None = None  # 単勝払戻率。None なら config.WIN_PAYOUT_RATE
     max_field: int = 10               # 最大頭数 (ばんえいは 10 頭立てが上限)
     scratch_prob: float = 0.0         # 出走取消・除外の確率 (頭数のばらつき)。0 なら乱数を消費しない
@@ -90,12 +93,16 @@ class SimConfig:
         *実際の勝敗* に対して較正される (p_win ∝ p_mkt^α で α ≈ 1) 温度 T。
           - 誤差の分だけ確率を縮める (errors-in-variables の減衰): 1 / (1 + (sd/CAL_TAU)^2)
           - 第2障害での停止 (_p_true には含まれない偶然) の分だけさらに縮める: 1 − CAL_STOP·stop_prob
+            (market_stop_aware=True なら停止は厳密に織り込むので不要)
         定数は sd ∈ {0, 0.1, 0.2}, stop_prob ∈ {0, 0.07}, seed 42/3/7/11 (各3年) で
         T=1 の市場に対する α を実測して当てはめた (各点 ±0.02 程度で一致)。
+        停止の縮小は平均的な近似で、断然人気のいるレースでは大穴がやや過小評価のまま残る
+        (真の期待値が 1 前後の大穴が出る)。帰無仮説の検証では market_stop_aware=True を使う。
         """
         if self.market_temp_calibrated is not None:
             return float(self.market_temp_calibrated)
-        return (1.0 - CAL_STOP * self.stop_prob) / (1.0 + (self.market_info_sd / CAL_TAU) ** 2)
+        stop = 1.0 if self.market_stop_aware else 1.0 - CAL_STOP * self.stop_prob
+        return stop / (1.0 + (self.market_info_sd / CAL_TAU) ** 2)
 
     def market_shape(self) -> tuple[float, float]:
         """(温度, flb のべき α) の実効値. d_flb = 1 なら従来の (market_temp, flb_alpha) と厳密に一致."""
@@ -121,11 +128,12 @@ PRESETS: dict[str, dict] = {
     # 従来の既定 (歪み 5 種類を全て埋め込み)
     "default": {},
     # 帰無仮説用: 歪みなし。市場は真の強さ (モデルが見られない調教の気配なども含む) を完全に知り、
-    # 停止の偶然を織り込んで較正した確率を付ける。モデルの特徴量はすべて真の強さの関数なので、
-    # 市場に足せる情報は原理的にゼロ。残る誤差はオッズの 0.1 倍単位の切り捨てだけ。
+    # 停止の偶然まで厳密に織り込んだ真の勝率そのもので値付けする (温度 1)。モデルの特徴量はすべて
+    # 真の強さの関数なので、市場に足せる情報は原理的にゼロ。残る誤差はオッズの 0.1 倍単位の切り捨てと
+    # 元返し (最低 1.0 倍) だけで、どの馬の真の期待値も ≈ 払戻率 0.8 (1 未満)。
     # (market_info_sd > 0 だと市場は公開情報で自分の誤差を補正しないため、モデルが拾える情報が
-    #  わずかに残る。scratch 実験 6 シードで s1 の追加係数 0.18±0.05。ただし控除 20% は越えない)
-    "efficient": dict(distortion=0.0, market_info_sd=0.0),
+    #  わずかに残る。scratch 実験 6 シードで s1 の追加係数 0.18±0.05)
+    "efficient": dict(distortion=0.0, market_info_sd=0.0, market_stop_aware=True),
     # 実データの統計に合わせた中間設定 (L1 調査: docs/research_banei.md, 検索結果の抜粋ベースで未検証)。
     #   実データ (帯広)                         このプリセット (seed 42/3/7, 2023-04〜2024-03)
     #   単勝払戻率 80%                          payout_rate=0.80
@@ -157,6 +165,47 @@ def _moisture_for(day: pd.Timestamp, rng: np.random.Generator,
     base = winter_mean if winter else summer_mean
     m = rng.gamma(shape=4.0, scale=base / 4.0)
     return float(np.clip(round(m, 1), 0.4, 9.5))
+
+
+STOP_PENALTY = (0.8, 2.5)  # 第2障害で止まったときの減速 (一様分布の範囲)
+_GL_X, _GL_W = np.polynomial.legendre.leggauss(8)
+
+
+def win_probs_with_stops(s: np.ndarray, noise_scale: float, stop_prob: float,
+                         n_grid: int = 600, chunk: int = 256) -> np.ndarray:
+    """成績 = s + Gumbel(0, noise_scale) − [確率 stop_prob で U(STOP_PENALTY) の減速] のときの勝率 (厳密).
+
+    P(i 勝ち) = ∫ f_i(x) Π_{j≠i} F_j(x) dx を数値積分 (減速の一様分布は 8 点 Gauss-Legendre)。
+    乱数を使わないので決定的。s は (頭数,) または (レース数, 頭数) で、空き枠は -inf。
+    stop_prob = 0 なら softmax(s / noise_scale) に一致する。
+    """
+    s = np.asarray(s, dtype=float)
+    one = s.ndim == 1
+    S = s[None, :] if one else s
+    b = noise_scale
+    a_, b_ = STOP_PENALTY
+    shifts = np.r_[0.0, a_ + (b_ - a_) * (_GL_X + 1) / 2]           # (K,)
+    weights = np.r_[1.0 - stop_prob, stop_prob * _GL_W / 2]          # (K,) 合計 1
+    t = np.linspace(-b_ - 5 * b, 14 * b, n_grid)                     # 最強馬の位置からの相対グリッド
+    out = np.empty_like(S)
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        for i0 in range(0, len(S), chunk):
+            Sc = S[i0:i0 + chunk]
+            top = np.max(np.where(np.isfinite(Sc), Sc, -np.inf), axis=1)
+            x = top[:, None] + t[None, :]                                          # (R, G)
+            z = (x[:, None, None, :] - Sc[:, :, None, None] + shifts[None, None, :, None]) / b
+            e = np.exp(-z)                                                         # (R, n, K, G)
+            F = np.einsum("rnkg,k->rng", np.exp(-e), weights)
+            f = np.einsum("rnkg,k->rng", np.exp(-z - e), weights) / b
+            f = np.nan_to_num(f)
+            # Π_{j≠i} F_j を前後からの累積積で (F=0 があっても安全に)
+            pre = np.cumprod(np.concatenate([np.ones_like(F[:, :1]), F[:, :-1]], axis=1), axis=1)
+            suf = np.flip(np.cumprod(np.flip(np.concatenate([F[:, 1:], np.ones_like(F[:, :1])], axis=1),
+                                             axis=1), axis=1), axis=1)
+            p = np.trapezoid(f * pre * suf, dx=t[1] - t[0], axis=2)
+            p = np.where(np.isfinite(Sc), p, 0.0)
+            out[i0:i0 + chunk] = p / p.sum(axis=1, keepdims=True)
+    return out[0] if one else out
 
 
 def simulate(cfg: SimConfig | None = None) -> pd.DataFrame:
@@ -301,7 +350,7 @@ def simulate(cfg: SimConfig | None = None) -> pd.DataFrame:
             )
             perf = strength + rng.gumbel(0, cfg.noise_scale, n)
             stopped = rng.random(n) < cfg.stop_prob
-            perf = perf - stopped * rng.uniform(0.8, 2.5, n)
+            perf = perf - stopped * rng.uniform(*STOP_PENALTY, n)
             dnf = rng.random(n) < 0.004
 
             order = np.argsort(-perf)
@@ -327,8 +376,11 @@ def simulate(cfg: SimConfig | None = None) -> pd.DataFrame:
                 mkt_view = mkt_view + (1.0 - s_moist) * (apt * moist_z)
             if s_drop != 1.0:
                 mkt_view = mkt_view - (1.0 - s_drop) * (0.25 * big_drop)
-            q = np.exp(mkt_temp * mkt_view / cfg.noise_scale)
-            q /= q.sum()
+            if cfg.market_stop_aware:
+                q = win_probs_with_stops(mkt_temp * mkt_view, cfg.noise_scale, cfg.stop_prob)
+            else:
+                q = np.exp(mkt_temp * mkt_view / cfg.noise_scale)
+                q /= q.sum()
             q = q ** mkt_alpha
             q /= q.sum()
             odds = np.maximum(1.0, np.floor(payout / q * 10) / 10)
@@ -384,6 +436,23 @@ def simulate(cfg: SimConfig | None = None) -> pd.DataFrame:
         lambda s: rng.permutation(len(s)) + 1
     )
     return df
+
+
+def true_win_probs(df: pd.DataFrame, cfg: SimConfig | None = None) -> pd.Series:
+    """検証用: 第2障害での停止まで含めた真の勝率 (シミュレーションのみ).
+
+    _p_true は停止なしの多項ロジット勝率なので、停止の偶然で勝率が平坦になる分 (大穴がやや有利、
+    特に断然人気がいるレース) を含まない。強さを noise_scale·log(_p_true) (レース内の定数を除いて一意)
+    から復元し、win_probs_with_stops で計算する。競走中止 (0.4%) は無視。df の行に対応し、レース内で和 1。
+    """
+    cfg = cfg or SimConfig()
+    d = df[["race_id", "_p_true"]].copy()
+    d["_k"] = d.groupby("race_id").cumcount()
+    wide = d.pivot(index="race_id", columns="_k", values="_p_true")
+    strength = np.log(wide.to_numpy()) * cfg.noise_scale
+    p = win_probs_with_stops(np.where(np.isnan(strength), -np.inf, strength), cfg.noise_scale, cfg.stop_prob)
+    rows = wide.index.get_indexer(d["race_id"])
+    return pd.Series(p[rows, d["_k"].to_numpy()], index=df.index, name="p_true_stop")
 
 
 def main(argv: list[str] | None = None) -> None:
