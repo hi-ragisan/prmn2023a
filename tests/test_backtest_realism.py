@@ -136,6 +136,12 @@ def test_flat_and_kelly_roi_fall_with_stake_and_bankroll(fitted):
     assert big["paid_odds_ratio"] < small["paid_odds_ratio"] <= 1.0
     capped = B.kelly_bet(bets, bankroll=10_000_000.0, pool_yen=1_000_000.0, max_stake=10_000, detail=True)
     assert capped["max_stake"] <= 10_000
+    # レースごとの売上を列で渡せる (一定値なら定数と同じ、0 のレースは影響なし)
+    col = bets.assign(win_pool_yen=1_000_000.0)
+    assert B.flat_bet(col, 10_000, pool_yen="win_pool_yen") == B.flat_bet(bets, 10_000, pool_yen=1_000_000.0)
+    assert B.kelly_bet(col, pool_yen="win_pool_yen") == B.kelly_bet(bets, pool_yen=1_000_000.0)
+    zero = bets.assign(win_pool_yen=0.0)
+    assert B.flat_bet(zero, 10_000, pool_yen="win_pool_yen")["roi"] == _flat_bet_ref(bets, 10_000)["roi"]
 
 
 def test_pool0_sigma0_reproduce_current_results(fitted):
