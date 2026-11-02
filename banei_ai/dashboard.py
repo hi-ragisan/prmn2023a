@@ -294,11 +294,21 @@ def section_summary(ctx: dict) -> str:
             else "✗ ① 較正後の市場と比較できません (オッズなし)",
             f"{'✓' if good_cons else '✗'} ② 四半期ごとの一貫性: {n_pos}/{len(gains)} 期で較正後の市場より正確",
         ]
+        n_bets = int(r["bets"]) if r.get("bets") else 0
+        has_bets = n_bets >= 30
+        lines.append(f"{'✓' if has_bets else '✗'} ③ 期待値 ≥ {rule.min_ev:g} の購入候補: {n_bets} 点"
+                     + ("" if has_bets else " (精度は市場より上でも、控除率を超える買い目がほとんど無い)"))
         if sh.get("chosen_min_ev") is not None:
-            lines.append(f"(参考) ③ 後半の回収率 {_pct(sh['second_half_roi'], 0)}・90%区間 "
+            lines.append(f"(参考) ④ 後半の回収率 {_pct(sh['second_half_roi'], 0)}・90%区間 "
                          f"{_ci(sh['second_half_roi_lo90'], sh['second_half_roi_hi90'])} — 回収率は運で大きく振れるため判定には使いません")
-        head = ("本番投入の目安を満たしています" if good_ll and good_cons else "本番投入の目安は未達です")
-        verdict = _status("good" if good_ll and good_cons else "warn", head) + \
+        ok_all = good_ll and good_cons and has_bets
+        if ok_all:
+            head = "本番投入の目安を満たしています"
+        elif good_ll and good_cons:
+            head = "市場より正確だが、買える馬がほとんど無い (本番投入は見送り)"
+        else:
+            head = "本番投入の目安は未達です"
+        verdict = _status("good" if ok_all else "warn", head) + \
             '<ul class="crit">' + "".join(f"<li>{esc(x)}</li>" for x in lines) + "</ul>"
     except Exception:  # noqa: BLE001
         pass
