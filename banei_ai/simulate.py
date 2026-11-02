@@ -12,6 +12,18 @@
   4. 馬場水分適性を市場が無視
   5. 馬体重の大幅減を市場が軽視
 一方で市場は、モデルが見られない情報 (調教の気配など) も一部持っている。
+
+歪みの強さは SimConfig.distortion (0〜1, 既定 1 = 従来どおり) でまとめて、
+または d_flb / d_fame / d_overreact / d_moist / d_weight_drop で個別に調整できる。
+  distortion = 0 → 歪みなし: 市場の見立て = 真の強さ + 誤差 (market_info_sd)、
+                   確率は誤差を織り込んで (実際の勝敗に対して) 較正済み。
+注意: market_info_sd > 0 の誤差は「真の強さに後から乗る測定誤差」なので、市場は公開情報 (近走成績) で
+自分の誤差を補正していない。この分はモデルが正当に拾える小さな情報になる (半強度の効率性は満たさない)。
+帰無仮説の検証には market_info_sd = 0 (市場が真の強さを完全に知る) の "efficient" を使う。
+プリセット:
+  SimConfig.preset("default")    従来どおり (既存テスト・README の数値はこれ)
+  SimConfig.preset("efficient")  歪みなし + 市場は真の強さを完全に知る (帰無仮説の検証用)
+  SimConfig.preset("realistic")  実データの統計 (人気別勝率・回収率・頭数・払戻率) に合わせた中間設定
 """
 from __future__ import annotations
 
@@ -45,6 +57,76 @@ class SimConfig:
     market_info_sd: float = 0.20  # 市場の能力認識の誤差
     market_private_sd: float = 0.25  # 市場だけが知る情報 (調教など) の大きさ
     market_temp: float = 0.7      # 市場の確信度 (自分の認識誤差を考慮して確率を縮める)
+    # ---- 以下は追加フィールド。既定値では従来と完全に同じデータを生成する ----
+    # 埋め込んだ歪みの全体スケール (0 = 歪みなし, 1 = 従来)。1 を超えると誇張。
+    distortion: float = 1.0
+    # 歪みごとの個別スケール。None なら distortion を使う。
+    d_flb: float | None = None        # 1. 大穴過剰人気 (flb_alpha と、較正温度からの過小確信 market_temp)
+    d_fame: float | None = None       # 2. 人気騎手の過大評価
+    d_overreact: float | None = None  # 3. 前走着順への過剰反応
+    d_moist: float | None = None      # 4. 馬場水分適性の無視 (0 なら市場も適性を織り込む)
+    d_weight_drop: float | None = None  # 5. 馬体重大幅減の軽視 (0 なら市場も織り込む)
+    # d_flb = 0 のときの市場温度。None なら market_info_sd から自動計算 (calibrated_temp)。
+    market_temp_calibrated: float | None = None
+    payout_rate: float | None = None  # 単勝払戻率。None なら config.WIN_PAYOUT_RATE
+    max_field: int = 10               # 最大頭数 (ばんえいは 10 頭立てが上限)
+    scratch_prob: float = 0.0         # 出走取消・除外の確率 (頭数のばらつき)。0 なら乱数を消費しない
+    min_field: int = 5                # 取消後の最少頭数
+
+    def scale(self, name: str) -> float:
+        """歪み name (flb / fame / overreact / moist / weight_drop) の実効スケール."""
+        v = getattr(self, f"d_{name}")
+        v = self.distortion if v is None else v
+        if v < 0:
+            raise ValueError(f"d_{name} / distortion は 0 以上: {v}")
+        return float(v)
+
+    def calibrated_temp(self) -> float:
+        """歪みなしの市場が使う「較正された」温度.
+
+        市場の見立て v = 真の強さ s + 誤差 e (sd = market_info_sd) のとき、softmax(T·v/noise) が
+        *実際の勝敗* に対して較正される (p_win ∝ p_mkt^α で α ≈ 1) 温度 T。
+          - 誤差の分だけ確率を縮める (errors-in-variables の減衰): 1 / (1 + (sd/CAL_TAU)^2)
+          - 第2障害での停止 (_p_true には含まれない偶然) の分だけさらに縮める: 1 − CAL_STOP·stop_prob
+        定数は sd ∈ {0, 0.1, 0.2}, stop_prob ∈ {0, 0.07}, seed 42/3/7/11 (各3年) で
+        T=1 の市場に対する α を実測して当てはめた (各点 ±0.02 程度で一致)。
+        """
+        if self.market_temp_calibrated is not None:
+            return float(self.market_temp_calibrated)
+        return (1.0 - CAL_STOP * self.stop_prob) / (1.0 + (self.market_info_sd / CAL_TAU) ** 2)
+
+    def market_shape(self) -> tuple[float, float]:
+        """(温度, flb のべき α) の実効値. d_flb = 1 なら従来の (market_temp, flb_alpha) と厳密に一致."""
+        s = self.scale("flb")
+        # s = 1 のとき (1 - s) = 0.0 なので浮動小数点でも元の値と完全一致する
+        temp = self.market_temp + (1.0 - s) * (self.calibrated_temp() - self.market_temp)
+        alpha = self.flb_alpha + (1.0 - s) * (1.0 - self.flb_alpha)
+        return temp, alpha
+
+    @classmethod
+    def preset(cls, name: str = "default", **overrides) -> "SimConfig":
+        """名前付きプリセット (overrides で個別フィールドを上書き)."""
+        if name not in PRESETS:
+            raise ValueError(f"未知のプリセット {name!r}: {sorted(PRESETS)}")
+        return cls(**{**PRESETS[name], **overrides})
+
+
+# calibrated_temp の当てはめ定数
+CAL_TAU = 0.49   # レース内の真の強さのばらつきに相当 (強さの単位)
+CAL_STOP = 0.43  # 停止の偶然による確率の平坦化
+
+PRESETS: dict[str, dict] = {
+    # 従来の既定 (歪み 5 種類を全て埋め込み)
+    "default": {},
+    # 帰無仮説用: 歪みなし。市場は真の強さ (モデルが見られない調教の気配なども含む) を完全に知り、
+    # 停止の偶然を織り込んで較正した確率を付ける。モデルの特徴量はすべて真の強さの関数なので、
+    # 市場に足せる情報は原理的にゼロ。残る誤差はオッズの 0.1 倍単位の切り捨てだけ。
+    # (market_info_sd > 0 だと市場は公開情報で自分の誤差を補正しないため、モデルが拾える情報が
+    #  わずかに残る。scratch 実験 6 シードで s1 の追加係数 0.18±0.05。ただし控除 20% は越えない)
+    "efficient": dict(distortion=0.0, market_info_sd=0.0),
+    # 実データの統計に合わせた中間設定。値は暫定 (TODO: L1 の実データ統計で較正)。
+    "realistic": dict(distortion=0.25),
+}
 
 
 def _race_days(start: str, end: str) -> list[pd.Timestamp]:
@@ -64,6 +146,11 @@ def _moisture_for(day: pd.Timestamp, rng: np.random.Generator) -> float:
 def simulate(cfg: SimConfig | None = None) -> pd.DataFrame:
     cfg = cfg or SimConfig()
     rng = np.random.default_rng(cfg.seed)
+    s_fame, s_over = cfg.scale("fame"), cfg.scale("overreact")
+    s_moist, s_drop = cfg.scale("moist"), cfg.scale("weight_drop")
+    mkt_temp, mkt_alpha = cfg.market_shape()
+    payout = config.WIN_PAYOUT_RATE if cfg.payout_rate is None else cfg.payout_rate
+    F = cfg.max_field
 
     # ---------- 騎手 ----------
     J = cfg.n_jockeys
@@ -126,22 +213,27 @@ def simulate(cfg: SimConfig | None = None) -> pd.DataFrame:
 
         active = [h for h in horses if h["active"] and h["next_ok"] <= day]
         rng.shuffle(active)
-        target = cfg.races_per_day * 10
+        target = cfg.races_per_day * F
         runners = active[:target]
         if len(runners) < 16:
             continue
-        # クラス分け: 公開されている実績 (merit) 順に並べて 10 頭ずつ
+        # クラス分け: 公開されている実績 (merit) 順に並べて F (既定 10) 頭ずつ
         runners.sort(key=lambda h: -h["merit"])
         all_merits = np.array([h["merit"] for h in horses if h["active"]])
         qs = np.quantile(all_merits, np.linspace(1, 0, len(CLASS_ORDER) + 1)[1:-1])
 
-        chunks = [runners[i:i + 10] for i in range(0, len(runners), 10)]
+        chunks = [runners[i:i + F] for i in range(0, len(runners), F)]
         if len(chunks) > 1 and len(chunks[-1]) < 6:
             chunks[-2].extend(chunks.pop())
         chunks = chunks[: cfg.races_per_day]
         # 下級条件から順に組む
         for race_no, field in enumerate(reversed(chunks), start=1):
-            field = field[:10]
+            field = field[:F]
+            if cfg.scratch_prob > 0:  # 出走取消・除外 (既定 0 では乱数を消費しない)
+                keep = rng.random(len(field)) >= cfg.scratch_prob
+                if keep.sum() < cfg.min_field:
+                    keep[: cfg.min_field] = True
+                field = [h for h, k in zip(field, keep) if k]
             n = len(field)
             med_merit = float(np.median([h["merit"] for h in field]))
             cls_idx = int(np.searchsorted(-qs, -med_merit))
@@ -206,18 +298,24 @@ def simulate(cfg: SimConfig | None = None) -> pd.DataFrame:
 
             # ---------- 市場 ----------
             last_pct = np.array([h["last_finish_pct"] for h in field])
-            overreact = np.where(np.isnan(last_pct), 0.0, 0.20 * (0.5 - last_pct))
+            # 歪みのスケールが 1 のとき、以下の演算は従来のコードと浮動小数点レベルで一致する
+            # (x * 1.0 == x, 0.20 * 1.0 == 0.20)。乱数の消費順も変えない。
+            overreact = np.where(np.isnan(last_pct), 0.0, (0.20 * s_over) * (0.5 - last_pct))
             mkt_view = (
                 ability + rng.normal(0, cfg.market_info_sd, n)
-                + age_eff + j_skill[jockeys] + j_fame[jockeys] * 0.4 + trn
+                + age_eff + j_skill[jockeys] + j_fame[jockeys] * (0.4 * s_fame) + trn
                 - 0.012 * cw_rel + private + overreact
-                # 馬場水分適性・馬体重減は無視
             )
-            q = np.exp(cfg.market_temp * mkt_view / cfg.noise_scale)
+            # 歪み 4/5: 既定 (スケール 1) では馬場水分適性・馬体重減を市場は完全に無視
+            if s_moist != 1.0:
+                mkt_view = mkt_view + (1.0 - s_moist) * (apt * moist_z)
+            if s_drop != 1.0:
+                mkt_view = mkt_view - (1.0 - s_drop) * (0.25 * big_drop)
+            q = np.exp(mkt_temp * mkt_view / cfg.noise_scale)
             q /= q.sum()
-            q = q ** cfg.flb_alpha
+            q = q ** mkt_alpha
             q /= q.sum()
-            odds = np.maximum(1.0, np.floor(config.WIN_PAYOUT_RATE / q * 10) / 10)
+            odds = np.maximum(1.0, np.floor(payout / q * 10) / 10)
             pop = pd.Series(odds).rank(method="first").to_numpy()
 
             base_time = 118 - 5.0 * (moist - 2.0) + 0.06 * (base_w - 650)
@@ -277,10 +375,15 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--start", default="2023-04-01")
     ap.add_argument("--end", default="2025-03-31")
     ap.add_argument("--seed", type=int, default=config.RANDOM_SEED)
+    ap.add_argument("--preset", default="default", choices=sorted(PRESETS))
+    ap.add_argument("--distortion", type=float, default=None, help="歪みの全体スケール (0〜1)")
     ap.add_argument("--out", default=str(config.INTERIM_DIR / "simulated.csv"))
     a = ap.parse_args(argv)
     config.ensure_dirs()
-    df = simulate(SimConfig(start=a.start, end=a.end, seed=a.seed))
+    kw = dict(start=a.start, end=a.end, seed=a.seed)
+    if a.distortion is not None:
+        kw["distortion"] = a.distortion
+    df = simulate(SimConfig.preset(a.preset, **kw))
     df.to_csv(a.out, index=False)
     print(f"{len(df)} 行 / {df['race_id'].nunique()} レース → {a.out}")
 
