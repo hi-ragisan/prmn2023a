@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from . import backtest as B
@@ -23,6 +24,10 @@ from .model import BaneiModel, evaluate_probs, walk_forward
 
 DEFAULT_DATA = config.INTERIM_DIR / "races.csv"
 DEFAULT_MODEL = config.MODEL_DIR / "model.pkl"
+# 1 レースの単勝売上の仮定 (円)。帯広の年間売上 ≈ 550億円 / 約1,650レース ≈ 3,300万円/レース (全券種),
+# 単勝のシェア ≈ 8% (2026-03 の実例) → 約 250 万円。通常レース 100〜500 万円、重賞は 1,000 万円超。
+# 推定値 (確度: 中)。レースごとの実売上が手に入ったら差し替えること。
+DEFAULT_WIN_POOL_YEN = 2_500_000.0
 
 
 def _load(path: str | Path) -> pd.DataFrame:
@@ -125,12 +130,136 @@ def cmd_import(a):
     _check(df)
 
 
+def _fmt_yen(x: float) -> str:
+    if not np.isfinite(x):
+        return "プール額でも黒字"
+    return "100円でも赤字" if x <= 0 else f"{x:,.0f}"
+
+
+def _realism_lines(P: pd.DataFrame, a) -> list[str]:
+    """現実性の節: 自分の購入によるオッズ低下 (プールの大きさ) × 締切前オッズのズレ."""
+    rule = B.BetRule(min_ev=a.min_ev)
+    pools = tuple(sorted({*B.DEFAULT_POOLS, float(a.pool_yen)}))
+    sigmas = tuple(sorted({*B.DEFAULT_SIGMAS, float(a.odds_noise)}))
+    stakes = B.DEFAULT_STAKES
+    coef = B.stage2_market_coef(P)
+    dec = B.decision_sets(P, rule, sigmas, a.noise_reps, coef=coef)
+    kw = dict(payout_rate=a.payout_rate, decisions=dec)
+    rt = B.robustness_table(P, rule, pools, sigmas, stakes, a.noise_reps, **kw)
+    be = B.breakeven_table(P, rule, [p for p in pools if p > 0], sigmas, a.noise_reps, **kw)
+    k_sig = (float(a.odds_noise),)
+    kr = pd.concat([B.kelly_robustness(P, rule, pools, k_sig, n_rep=a.noise_reps, **kw),
+                    B.kelly_robustness(P, rule, [p for p in pools if p > 0], k_sig, n_rep=a.noise_reps,
+                                       max_stake_pct_pool=1.0, **kw)], ignore_index=True)
+
+    def pool_label(p):
+        return "影響なし" if p <= 0 else f"{p / 1e4:,.0f}万円"
+
+    head = rt[(rt["pool_yen"] == a.pool_yen) & (rt["odds_noise"] == a.odds_noise)]
+    h = pd.DataFrame({
+        "1点の賭け金": head["stake"].map("{:,.0f}円".format),
+        "点数": head["bets"],
+        "的中率": head["hit_rate"],
+        "回収率": head["roi"],
+        "90%区間": [f"[{lo:.3f}, {hi:.3f}]" for lo, hi in zip(head["roi_lo90"], head["roi_hi90"])],
+        "収支(円)": head["profit"].map("{:,.0f}".format),
+        "払戻オッズ比": head["paid_odds_ratio"],
+    })
+    piv = rt.pivot_table(index=["odds_noise", "pool_yen"], columns="stake", values="roi", sort=True)
+    piv.columns = [f"{c:,.0f}円" for c in piv.columns]
+    nb = rt.groupby(["odds_noise", "pool_yen"])["bets"].first()
+    bt = be.set_index(["odds_noise", "pool_yen"])
+    g = piv.reset_index()
+    g.insert(2, "点数", nb.reindex(pd.MultiIndex.from_frame(g[["odds_noise", "pool_yen"]])).to_numpy())
+    g["損益分岐の賭け金"] = [_fmt_yen(bt.loc[(s, p), "breakeven_stake"]) if p > 0 else "—"
+                       for s, p in zip(g["odds_noise"], g["pool_yen"])]
+    g["(プール比)"] = [f"{bt.loc[(s, p), 'breakeven_pct_pool']:.2f}%" if p > 0 and np.isfinite(
+        bt.loc[(s, p), "breakeven_stake"]) else "—" for s, p in zip(g["odds_noise"], g["pool_yen"])]
+    g["利益最大の賭け金"] = [f"{bt.loc[(s, p), 'best_stake']:,.0f}" if p > 0 else "—"
+                       for s, p in zip(g["odds_noise"], g["pool_yen"])]
+    g["pool_yen"] = g["pool_yen"].map(pool_label)
+    g = g.rename(columns={"odds_noise": "σ", "pool_yen": "単勝プール"})
+    g_fmt = [".2f", "", ".1f"] + [".3f"] * len(stakes) + ["", "", ""]
+    k = pd.DataFrame({
+        "初期資金": kr["bankroll0"].map("{:,.0f}".format),
+        "単勝プール": kr["pool_yen"].map(pool_label),
+        "1点上限": kr["max_stake_cap"].map(lambda x: "なし" if not np.isfinite(x) else f"{x:,.0f}"),
+        "資金倍率": kr["growth"],
+        "最大DD": kr["max_dd_pct"],
+        "平均賭け金": kr["mean_stake"].map("{:,.0f}".format),
+        "最後の1/4期間の平均賭け金": kr["last_q_mean_stake"].map("{:,.0f}".format),
+        "払戻オッズ比": kr["paid_odds_ratio"],
+    })
+    guide = []
+    if a.pool_yen > 0:
+        for o in (2.0, 3.0, 5.0, 10.0, 20.0, 40.0):
+            r = {"単勝オッズ": o, "その馬の票(円)": f"{a.payout_rate * a.pool_yen / o:,.0f}"}
+            for ev in (1.05, 1.10, 1.20, 1.30):
+                opt, b_e = B.optimal_stake(ev / o, o, a.pool_yen, a.payout_rate)
+                r[f"EV {ev:.2f}"] = f"{float(opt):,.0f} / {float(b_e):,.0f}"
+            guide.append(r)
+    # 参考: AI勝率を締切前オッズで計算し直さない (古い AI勝率 × 新しいオッズ) と逆選択が起きる
+    naive_sig = tuple(s for s in sigmas if s > 0)
+    naive_lines = []
+    if naive_sig:
+        nv = B.robustness_table(P, rule, (0.0,), naive_sig, (100.0,), a.noise_reps, coef=0.0,
+                                payout_rate=a.payout_rate, n_boot=200)
+        hon = rt[(rt["pool_yen"] == 0) & (rt["stake"] == 100.0)].set_index("odds_noise")
+        naive_lines = [
+            "\n### 参考: AI勝率を締切前オッズで計算し直さなかった場合 (プール影響なし, 100円)\n",
+            "- 「前に計算した AI勝率 × 最新オッズ」で期待値を判断すると、たまたまオッズが高く表示された馬ばかり買う (逆選択)。"
+            "Stage2 の市場係数 b≈1 なので、計算し直せば締切前オッズのズレはほぼ相殺される\n",
+            pd.DataFrame({"σ": nv["odds_noise"],
+                          "再計算する: 点数": hon.loc[nv["odds_noise"], "bets"].to_numpy(),
+                          "再計算する: 回収率": hon.loc[nv["odds_noise"], "roi"].to_numpy(),
+                          "しない: 点数": nv["bets"].to_numpy(), "しない: 回収率": nv["roi"].to_numpy()}).to_markdown(
+                index=False, floatfmt=[".2f", ".1f", ".3f", ".1f", ".3f"]),
+        ]
+    exact = coef["max_abs_err"].max()
+    guide_lines = [
+        f"\n### 1 点の賭け金の目安 (プール {a.pool_yen:,.0f} 円, 各セル = 利益最大 / 損益分岐, 円)\n",
+        "- 期待値 EV (自分が買う前のオッズでの p×o) と単勝オッズごとの理論値 (B.optimal_stake, 端数切り捨ては無視)。"
+        "利益最大の賭け金 ≈ (EV − 1)/2 × その馬に入っている票\n",
+        pd.DataFrame(guide).to_markdown(index=False, floatfmt=".1f"),
+    ] if guide else []
+    return [
+        f"\n## 現実性: 自分の購入によるオッズ低下 × 締切前オッズのズレ (min_ev={a.min_ev})\n",
+        f"- 単勝プール (1レースの単勝売上) **{a.pool_yen:,.0f} 円** を仮定 (調査による典型値 約250万円, "
+        "通常レース 100〜500万円, 重賞 1,000万円超。レースごとの実売上が取れたら差し替えること), 払戻率 "
+        f"{a.payout_rate:.0%}",
+        "- 自分の購入 s 円を足した払戻オッズ: o' = R·(T+Σs)/(W_i+s_i), W_i = R·T/(o_i+0.05) を 0.1 刻みで切り捨て (最低 1.0)",
+        f"- 締切前オッズ = 確定オッズ × exp(ε), ε~N(0, σ) (レース内で控除率を保って正規化)。"
+        f"σ>0 は {a.noise_reps} 回の抽選の平均。判断 (期待値・AI勝率) は締切前オッズ、払戻は確定オッズ",
+        f"- AI勝率は Stage2 の市場係数 b (ブロック別 {coef['b'].min():.3f}〜{coef['b'].max():.3f}, "
+        f"予測値からの復元誤差 {exact:.1e}) で締切前の市場確率に合わせて計算し直している",
+        "- 払戻オッズ比 = 実際に受け取るオッズ ÷ 自分が買わなかった場合の確定オッズ\n",
+        f"### 設定シナリオ: プール {a.pool_yen:,.0f} 円, σ={a.odds_noise}\n",
+        h.to_markdown(index=False, floatfmt=["", ".1f", ".3f", ".3f", "", "", ".3f"]),
+        "\n### 均等買いの回収率: プール × σ × 1点の賭け金\n",
+        "- 損益分岐の賭け金: これ以上を毎回賭けると回収率が 1 を下回る額 (100円単位)",
+        "- 利益最大の賭け金: 期待収支 = 賭け金 × (回収率 − 1) が最大になる額。自分の影響はおおむね 賭け金/プール で決まるので、"
+        "どちらもプールに比例する\n",
+        g.to_markdown(index=False, floatfmt=g_fmt),
+        *naive_lines,
+        *guide_lines,
+        f"\n### 1/4ケリー (1点上限 資金の3%) の資金推移, σ={a.odds_noise}\n",
+        "- 資金が増えると賭け金が増え、自分の購入でオッズが下がる。1点上限 = プールの 1% で頭打ちにした場合も併記\n",
+        k.to_markdown(index=False, floatfmt=".3f"),
+        "\n> 前提の限界: 締切前オッズのズレは情報を含まない雑音として扱っている (実際には締切直前の資金は情報を持つことが多く、"
+        "その場合の悪化はこれより大きい)。プールは全レース一定と仮定。詳細は docs/backtest_realism.md\n",
+    ]
+
+
 def cmd_backtest(a):
     config.ensure_dirs()
     df = _load(a.data)
     X = _features(df)
-    print("ウォークフォワード学習中...")
-    P = walk_forward(X, block_months=a.block_months)
+    if a.preds:
+        print(f"ウォークフォワード予測を読み込み: {a.preds}")
+        P = pd.read_pickle(a.preds)
+    else:
+        print("ウォークフォワード学習中...")
+        P = walk_forward(X, block_months=a.block_months)
     P.to_pickle(config.REPORT_DIR / "walkforward_preds.pkl")
     ev_tab = evaluate_probs(P)
     grid = B.threshold_grid(P)
@@ -169,11 +298,15 @@ def cmd_backtest(a):
     s1 = Stage1().fit(X[X["date"] >= X["date"].min() + pd.Timedelta(days=90)])
     lines.append(s1.importance().head(20).to_frame("gain").to_markdown(floatfmt=".0f"))
     lines.append("\n> 注意: 確定オッズでの検証です。購入時点のオッズとのズレ、自分の購入によるオッズ低下で実際の回収率は下がります。")
+    print("現実性 (プール・締切前オッズ) の感度分析中...")
+    realism = _realism_lines(P, a)
+    lines += realism
     out = config.REPORT_DIR / "backtest.md"
     out.write_text("\n".join(lines), encoding="utf-8")
     print("\n".join(lines[:9]))
     print(grid.to_string(index=False))
     print("\n" + "\n".join(l for l in lines if "前半" in l or "後半" in l))
+    print("\n" + "\n".join(realism[6:8]))
     print(f"\n詳細 → {out}")
 
 
@@ -325,6 +458,15 @@ def main(argv=None):
         s.add_argument("--min-ev", type=float, default=1.10)
         s.add_argument("--days", type=int, default=365)
         s.add_argument("--min-rides", type=int, default=50)
+        if name == "backtest":
+            s.add_argument("--pool-yen", type=float, default=DEFAULT_WIN_POOL_YEN,
+                           help="1レースの単勝売上 (円) の仮定。自分の購入によるオッズ低下の計算に使う。0 = 影響なし")
+            s.add_argument("--odds-noise", type=float, default=0.0,
+                           help="締切前オッズのズレ σ (締切前 = 確定 × exp(N(0,σ)))。0 = 確定オッズで判断")
+            s.add_argument("--payout-rate", type=float, default=config.WIN_PAYOUT_RATE, help="単勝の払戻率")
+            s.add_argument("--noise-reps", type=int, default=5, help="σ>0 のときの抽選回数")
+            s.add_argument("--preds", default=None,
+                           help="保存済みのウォークフォワード予測 (walkforward_preds.pkl) を使い、学習を省略")
         s.set_defaults(fn=fn)
 
     s = sub.add_parser("predict", help="当日予測")
