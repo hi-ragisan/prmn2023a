@@ -72,6 +72,8 @@ class SimConfig:
     max_field: int = 10               # 最大頭数 (ばんえいは 10 頭立てが上限)
     scratch_prob: float = 0.0         # 出走取消・除外の確率 (頭数のばらつき)。0 なら乱数を消費しない
     min_field: int = 5                # 取消後の最少頭数
+    moist_winter: float = 3.5         # 馬場水分の平均 (%) 冬 12〜3 月
+    moist_summer: float = 1.6         # 同 それ以外
 
     def scale(self, name: str) -> float:
         """歪み name (flb / fame / overreact / moist / weight_drop) の実効スケール."""
@@ -124,8 +126,21 @@ PRESETS: dict[str, dict] = {
     # (market_info_sd > 0 だと市場は公開情報で自分の誤差を補正しないため、モデルが拾える情報が
     #  わずかに残る。scratch 実験 6 シードで s1 の追加係数 0.18±0.05。ただし控除 20% は越えない)
     "efficient": dict(distortion=0.0, market_info_sd=0.0),
-    # 実データの統計に合わせた中間設定。値は暫定 (TODO: L1 の実データ統計で較正)。
-    "realistic": dict(distortion=0.25),
+    # 実データの統計に合わせた中間設定 (L1 調査: docs/research_banei.md, 検索結果の抜粋ベースで未検証)。
+    #   実データ (帯広)                         このプリセット (seed 42/3/7, 2023-04〜2024-03)
+    #   単勝払戻率 80%                          payout_rate=0.80
+    #   1番人気 勝率 34〜37% (年により 33〜37)  32〜39%
+    #   1番人気 回収率 ≈82% (年により 79〜93)   87〜92%   (やや高い)
+    #   人気別回収率 2〜4番 78〜79, 5〜7番 68〜78, 8番 ≈50   2〜4番 70〜94, 5〜7番 61〜74, 8番 41〜68
+    #   単勝平均配当 661 円                     666〜677 円
+    #   1日 11R (一部 12R), フルゲート 10 頭     10.9R/日 (n_horses=800), 平均 9.6 頭 (scratch_prob=0.04)
+    #   馬場水分 冬 ≈2.8%, 夏 ≈1.3% (n≈12, 低信頼)
+    # 大穴の過剰人気は実データで確認できるので d_flb=0.5 (人気別回収率と平均配当に合わせた)。
+    # TODO: 騎手人気・前走過剰反応・水分適性・馬体重の歪みは実データでの大きさが未測定。
+    #       「実在するとしても小さい」という仮定で 0.25 にしている (実データの report で要確認)。
+    #       平均頭数 9.6 も実数未確認 (L1 推定 9.3〜9.8)。
+    "realistic": dict(distortion=0.25, d_flb=0.5, payout_rate=0.80, n_horses=800,
+                      scratch_prob=0.04, moist_winter=2.8, moist_summer=1.3),
 }
 
 
@@ -135,10 +150,11 @@ def _race_days(start: str, end: str) -> list[pd.Timestamp]:
     return [d for d in days if d.dayofweek in (5, 6, 0)]
 
 
-def _moisture_for(day: pd.Timestamp, rng: np.random.Generator) -> float:
+def _moisture_for(day: pd.Timestamp, rng: np.random.Generator,
+                  winter_mean: float = 3.5, summer_mean: float = 1.6) -> float:
     # 冬 (12-3月) は水分が高く軽い馬場、夏は乾燥
     winter = day.month in (12, 1, 2, 3)
-    base = 3.5 if winter else 1.6
+    base = winter_mean if winter else summer_mean
     m = rng.gamma(shape=4.0, scale=base / 4.0)
     return float(np.clip(round(m, 1), 0.4, 9.5))
 
@@ -208,7 +224,7 @@ def simulate(cfg: SimConfig | None = None) -> pd.DataFrame:
             for _ in range(max(n_new, 0)):
                 new_horse(2, day)
 
-        moist = _moisture_for(day, rng)
+        moist = _moisture_for(day, rng, cfg.moist_winter, cfg.moist_summer)
         moist_z = (moist - 2.5) / 1.5
 
         active = [h for h in horses if h["active"] and h["next_ok"] <= day]
