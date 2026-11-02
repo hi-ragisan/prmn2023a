@@ -174,7 +174,11 @@ def prepare(df: pd.DataFrame) -> pd.DataFrame:
     # netkeiba のばんえいはクラス名が無い → 1着賞金 (万円) の対数をクラスの高さの指標にする
     if "prize1" in d.columns:
         p1 = pd.to_numeric(d["prize1"], errors="coerce")
-        d["class_rank"] = np.log(p1.where(p1 > 0)).where(p1.notna(), d["class_rank"])
+        if p1.notna().mean() > 0.5:
+            # 賞金が大半で取れているデータでは尺度を混ぜない (取れない行は不明 = NaN)
+            d["class_rank"] = np.log(p1.where(p1 > 0))
+        else:
+            d["class_rank"] = np.log(p1.where(p1 > 0)).where(p1.notna(), d["class_rank"])
     n = d["n_runners"]
     fin = d["finish"].where(d["status"] == "ok")
     # 中止は最下位扱い。出馬表 (status=entry, 結果未確定) は NaN のまま
