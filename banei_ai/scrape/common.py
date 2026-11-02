@@ -1,6 +1,11 @@
-"""HTTP 取得 (キャッシュ・レート制限付き) と、見出し語ベースの表パーサー."""
+"""HTTP 取得 (キャッシュ・レート制限付き) と、見出し語ベースの表パーサー.
+
+実ページ構造の根拠は docs/scraper_verification.md を参照 (開発環境から実サイトには
+アクセスできなかったため、公開されている実ページの保存物・他者のパーサーから確認した)。
+"""
 from __future__ import annotations
 
+import codecs
 import hashlib
 import re
 import time
@@ -14,8 +19,63 @@ from .. import config, schema
 
 UA = "Mozilla/5.0 (personal research; banei-ai)"
 
+_META_CHARSET = re.compile(rb"<meta[^>]{0,200}?charset\s*=\s*[\"']?\s*([A-Za-z0-9_\-]+)", re.I)
+# キャッシュ済み HTML がこの数以上の置換文字 (U+FFFD) を含むなら文字化けとみなして取り直す
+_MOJIBAKE_LIMIT = 20
+
+
+def _codec_name(enc: str | None) -> str | None:
+    if not enc:
+        return None
+    try:
+        return codecs.lookup(enc.strip()).name
+    except LookupError:
+        return None
+
+
+def decode_html(content: bytes, header_encoding: str | None = None,
+                hint: str | None = None) -> tuple[str, str]:
+    """バイト列 → 文字列. (文字列, 採用した文字コード) を返す.
+
+    優先順: BOM > HTTP ヘッダーの charset > <meta charset> > hint > utf-8 > euc-jp > cp932。
+    各候補で「厳密に」デコードを試し、失敗したら次へ進む (UTF-8 のページを EUC-JP と
+    決め打ちして全文字化けする事故を防ぐ)。nar.netkeiba.com は以前 EUC-JP だったが、
+    現在は UTF-8 で配信されているという報告があるため、決め打ちはしない。
+    どれも厳密には通らなければ、最初の候補で置換デコードする。
+    """
+    cands: list[str] = []
+    if content.startswith(b"\xef\xbb\xbf"):
+        cands.append("utf-8-sig")
+    hdr = _codec_name(header_encoding)
+    if hdr and hdr not in ("latin-1", "iso8859-1", "cp1252"):  # requests の既定値は無視
+        cands.append(hdr)
+    m = _META_CHARSET.search(content[:4096])
+    if m:
+        meta = _codec_name(m.group(1).decode("ascii", "ignore"))
+        if meta:
+            cands.append(meta)
+    for enc in (hint, "utf-8", "euc-jp", "euc_jis_2004", "cp932"):
+        e = _codec_name(enc)
+        if e:
+            cands.append(e)
+    seen: list[str] = []
+    for enc in cands:
+        if enc in seen:
+            continue
+        seen.append(enc)
+        try:
+            return content.decode(enc), enc
+        except UnicodeDecodeError:
+            continue
+    return content.decode(seen[0], errors="replace"), seen[0]
+
 
 class Fetcher:
+    """キャッシュ・レート制限付きの GET.
+
+    encoding はページが文字コードを宣言していない場合のヒント (決め打ちではない)。
+    """
+
     def __init__(self, cache_dir: Path | None = None, wait: float = 2.0, encoding: str | None = None):
         import requests
 
@@ -26,6 +86,7 @@ class Fetcher:
         self.wait = wait
         self.encoding = encoding
         self._last = 0.0
+        self.last_encoding: str | None = None
 
     def _path(self, url: str) -> Path:
         h = hashlib.sha1(url.encode()).hexdigest()[:20]
@@ -40,18 +101,19 @@ class Fetcher:
     def get(self, url: str, use_cache: bool = True) -> str:
         p = self._path(url)
         if use_cache and p.exists():
-            return p.read_text(encoding="utf-8")
+            text = p.read_text(encoding="utf-8")
+            if text.count("�") < _MOJIBAKE_LIMIT:
+                return text
+            # 以前の版で文字コードを決め打ちして化けたキャッシュは取り直す
         dt = time.time() - self._last
         if dt < self.wait:
             time.sleep(self.wait - dt)
         r = self.session.get(url, timeout=30)
         self._last = time.time()
         r.raise_for_status()
-        if self.encoding:
-            r.encoding = self.encoding
-        elif r.encoding is None or r.encoding.lower() == "iso-8859-1":
-            r.encoding = r.apparent_encoding
-        text = r.text
+        ctype = r.headers.get("Content-Type", "")
+        header_enc = r.encoding if "charset" in ctype.lower() else None
+        text, self.last_encoding = decode_html(r.content, header_enc, self.encoding)
         if use_cache:
             p.write_text(text, encoding="utf-8")
         return text
@@ -73,6 +135,8 @@ HEADER_RULES: list[tuple[str, list[str]]] = [
     ("odds_win", ["単勝オッズ", "単勝", "オッズ"]),
     ("popularity", ["人気"]),
 ]
+# 見出しとみなす最大文字数 (ページ全体を包む外枠の表のセルを見出しと誤認しないため)
+_MAX_HEADER_LEN = 25
 
 
 def _flatten(col) -> str:
@@ -87,12 +151,24 @@ def _flatten(col) -> str:
     return str(col)
 
 
-def map_headers(columns) -> dict:
-    """DataFrame の列 → 正規列名 の対応を作る."""
-    mapping: dict = {}
+def header_name(col) -> str:
+    """見出しセル → 空白を除いた文字列 (pandas が重複見出しに付ける '.1' も除く)."""
+    s = re.sub(r"\s+", "", _flatten(col))
+    return re.sub(r"\.\d+$", "", s)
+
+
+def _map_names(names: list[str]) -> list[str | None]:
+    """見出し文字列のリスト → 位置ごとの正規列名 (なければ None)."""
+    out: list[str | None] = [None] * len(names)
     used: set[str] = set()
-    for col in columns:
-        name = re.sub(r"\s+", "", _flatten(col))
+    for i, name in enumerate(names):
+        if not name or name == "nan" or len(name) > _MAX_HEADER_LEN:
+            continue
+        # keiba.go.jp の成績表は馬体重の増減が「差」という単独の列
+        if name == "差" and "horse_weight_diff" not in used:
+            out[i] = "horse_weight_diff"
+            used.add("horse_weight_diff")
+            continue
         for key, words in HEADER_RULES:
             if key in used:
                 continue
@@ -104,37 +180,89 @@ def map_headers(columns) -> dict:
                 # 「単勝人気」は人気、「単勝オッズ」はオッズ
                 if key == "odds_win" and "人気" in name:
                     continue
-                mapping[col] = key
+                out[i] = key
                 used.add(key)
                 break
-    return mapping
+    return out
+
+
+def map_headers(columns) -> dict:
+    """DataFrame の列 → 正規列名 の対応を作る."""
+    cols = list(columns)
+    keys = _map_names([header_name(c) for c in cols])
+    return {c: k for c, k in zip(cols, keys) if k is not None}
+
+
+def _usable(keys) -> bool:
+    ks = {k for k in keys if k}
+    return "horse_name" in ks and bool({"post", "finish"} & ks)
+
+
+def read_tables(html: str) -> list[pd.DataFrame]:
+    """ページ内の全ての表. 表が無ければ空リスト.
+
+    flavor を lxml に固定する (既定では表が無いとき bs4+html5lib に切り替わり、
+    html5lib が入っていないと ValueError ではなく ImportError で落ちる = 非開催日で停止していた)。
+    """
+    try:
+        return pd.read_html(StringIO(html), flavor="lxml")
+    except (ValueError, IndexError, ImportError):
+        return []
+
+
+def inspect_tables(html: str, tables: list[pd.DataFrame] | None = None) -> list[dict]:
+    """ページ内の各表について、見出し行の位置と 見出し→正規列名 の対応を調べる.
+
+    見出しが <th> でなく <td> で書かれた表 (keiba.go.jp の成績表は
+    「４R 成績表」というタイトル行の次に <tr class="dbitem"><td>着<br>順</td>... が来る)
+    では pandas が見出しを認識しないので、先頭 6 行から見出し行を探す。
+    """
+    tables = read_tables(html) if tables is None else tables
+    out = []
+    for i, t in enumerate(tables):
+        names = [header_name(c) for c in t.columns]
+        keys = _map_names(names)
+        header_row = None  # None = pandas が認識した見出しを使用
+        if not _usable(keys):
+            for r in range(min(6, len(t))):
+                cand = ["" if pd.isna(v) else header_name(v) for v in t.iloc[r]]
+                ck = _map_names(cand)
+                if _usable(ck):
+                    names, keys, header_row = cand, ck, r
+                    break
+        body = t.iloc[header_row + 1:] if header_row is not None else t
+        usable = _usable(keys)
+        n_rows = 0
+        if usable:
+            pos = keys.index("post") if "post" in keys else keys.index("finish")
+            n_rows = int(body.iloc[:, pos].map(schema.to_float).notna().sum())
+        out.append({"index": i, "shape": t.shape, "header_row": header_row, "headers": names,
+                    "keys": keys, "usable": usable, "n_rows": n_rows, "body": body})
+    return out
 
 
 def find_entry_table(html: str) -> pd.DataFrame | None:
-    """ページ内の表のうち「馬名」列を持つ最大の表を、正規列名で返す."""
-    try:
-        tables = pd.read_html(StringIO(html))
-    except ValueError:
+    """ページ内の表のうち「馬名」と「馬番」(または着順) の見出しを持ち、
+    馬番が数値の行が最も多い表を、正規列名で返す."""
+    infos = [x for x in inspect_tables(html) if x["usable"] and x["n_rows"] > 0]
+    if not infos:
         return None
-    best = None
-    for t in tables:
-        m = map_headers(t.columns)
-        if "horse_name" in m.values() and ("post" in m.values() or "finish" in m.values()):
-            if best is None or len(t) > len(best[0]):
-                best = (t, m)
-    if best is None:
-        return None
-    t, m = best
-    t = t[list(m)].copy()
-    t.columns = [m[c] for c in t.columns]
+    best = max(infos, key=lambda x: x["n_rows"])
+    pos = [i for i, k in enumerate(best["keys"]) if k]
+    t = best["body"].iloc[:, pos].copy()
+    t.columns = [best["keys"][i] for i in pos]
     t = t.loc[:, ~t.columns.duplicated()]
-    return t
+    return t.reset_index(drop=True)
+
+
+_MARKS = "☆▲△★◇◆□■▽▼"
 
 
 def norm_name(v) -> str:
-    """空白と減量記号 (☆▲△★◇) を除いた名前."""
+    """空白・減量記号 (☆▲△★◇ 等)・末尾の所属 ((帯広) / （帯広）) を除いた名前."""
     s = re.sub(r"\s+", "", str(v))
-    return re.sub(r"^[☆▲△★◇]+", "", s)
+    s = re.sub(f"^[{_MARKS}]+", "", s)
+    return re.sub(r"[（(][^（()）]{1,6}[)）]$", "", s)
 
 
 def link_ids(html: str, pattern: str) -> dict[str, str]:
@@ -157,19 +285,23 @@ def attach_ids(t: pd.DataFrame, name_col: str, id_col: str, mapping: dict[str, s
     """名前→ID 対応で ID を付ける.
 
     セルに父・母名などが一緒に入っていて完全一致しない場合は、リンク文字列がセルの先頭に
-    一致するもの (最長一致) を採用し、名前もリンク文字列に置き換える。見つからなければ名前を ID にする。
+    一致するもの (最長一致)、次に末尾に一致するもの (netkeiba の厩舎セルは「帯広」などの
+    所属が名前の前に付く) を採用し、名前もリンク文字列に置き換える。
+    見つからなければ名前を ID にする。
     """
     if name_col not in t:
         t[id_col] = np.nan
         return t
     names = sorted(mapping, key=len, reverse=True)
     ids, fixed = [], []
-    for v in t[name_col].astype(str):
+    for v in t[name_col].map(str):
         if v in mapping:
             ids.append(mapping[v])
             fixed.append(v)
             continue
         hit = next((n for n in names if v.startswith(n)), None)
+        if hit is None:
+            hit = next((n for n in names if len(n) >= 2 and v.endswith(n)), None)
         ids.append(mapping[hit] if hit else v)
         fixed.append(hit or v)
     t[name_col] = fixed
@@ -177,29 +309,96 @@ def attach_ids(t: pd.DataFrame, name_col: str, id_col: str, mapping: dict[str, s
     return t
 
 
-def find_moisture(html: str) -> float:
-    """ページ本文から馬場水分 (%) を探す."""
+def id_hit_rate(t: pd.DataFrame, id_col: str, name_col: str) -> float:
+    """ID 列のうち、リンクから ID が取れた (名前のままでない) 割合."""
+    if id_col not in t or name_col not in t or len(t) == 0:
+        return float("nan")
+    ok = t[id_col].map(str) != t[name_col].map(str)
+    return float(ok.mean())
+
+
+# ---- レース情報 (馬場水分・クラス・レース名) ----
+
+# レース名・条件が書かれていそうな要素 (ページ全体だとナビの他レース名や、
+# 出馬表の各馬の過去走欄を拾うため、まずここを見る)
+#   netkeiba: .RaceName / .RaceData01 (「18:55発走 / 直200m / 天候:晴 / 水分量:1.6」)
+#   keiba.go.jp 出馬表・オッズ: section.raceTitle (h3 = レース名, ul.dataArea = 「天候：曇　馬場：…」)
+#   keiba.go.jp 成績表: span.plus1bold02 = レース名
+_INFO_SELECTORS = (".RaceData01, .RaceData02, .RaceList_Item02, .raceTitle .dataArea, "
+                   ".raceTitle, .racedata, .race_data")
+_HEADER_SELECTORS = (".RaceName, .plus1bold02, .raceTitle h3, .RaceData02, .RaceList_Item02, "
+                     ".raceTitle, .race_title, h1, h2, h3, h4, title")
+
+_MOIST_HEADER_RX = [
+    # netkeiba ばんえい: 「水分量:1.6」(% なし)。他サイト: 「水分 3.2%」
+    re.compile(r"水分量?\s*:?\s*(\d+(?:\.\d+)?)\s*%?"),
+    # keiba.go.jp: ばんえいは「馬場」に良/重ではなく水分の数値が入る
+    re.compile(r"馬場\s*:\s*(\d+(?:\.\d+)?)\s*%?"),
+    re.compile(r"馬場[^0-9/]{0,12}?(\d+\.\d)\s*%"),
+    re.compile(r"\((\d+\.\d)\s*%\)"),
+]
+# ページ全体で探すときは「水分」「馬場:」の直後の数値だけ (過去走欄の誤検出を避ける)
+_MOIST_PAGE_RX = [re.compile(r"水分量?\s*:\s*(\d+(?:\.\d+)?)"),
+                  re.compile(r"水分量?\s*(\d+(?:\.\d+)?)\s*%"),
+                  re.compile(r"馬場\s*:\s*(\d+(?:\.\d+)?)\s*%?")]
+MOISTURE_RANGE = (0.0, 20.0)
+
+
+def _soup(html: str):
     from bs4 import BeautifulSoup
 
-    text = BeautifulSoup(html, "lxml").get_text(" ")
-    for rx in [r"水分\s*[:：]?\s*(\d+(?:\.\d+)?)\s*[%％]",
-               r"馬場[^0-9]{0,12}(\d+\.\d)\s*[%％]",
-               r"\((\d+\.\d)\s*[%％]\)"]:
-        m = re.search(rx, text)
-        if m:
-            return float(m.group(1))
-    return np.nan
+    return BeautifulSoup(html, "lxml")
+
+
+def _header_texts(soup) -> list[tuple[str, str]]:
+    """(どこから取ったか, テキスト) のリスト。レース情報が書かれていそうな短い要素."""
+    out = []
+    for el in soup.select(_INFO_SELECTORS):
+        out.append((f"{el.name}.{'.'.join(el.get('class') or [])}", el.get_text(" ")))
+    # 「天候」を含む文字列の親要素 (keiba.go.jp 成績表のようにクラスの無い表セルに書かれる場合)
+    for s in soup.find_all(string=re.compile("天候")):
+        el = s.parent
+        for _ in range(3):
+            if el is None:
+                break
+            txt = el.get_text(" ")
+            if len(txt) > 400:
+                break
+            out.append((f"天候を含む<{el.name}>", txt))
+            el = el.parent
+    return out
+
+
+def find_moisture_detail(html: str) -> tuple[float, str | None]:
+    """馬場水分 (%) と、それを見つけた場所."""
+    soup = _soup(html)
+    lo, hi = MOISTURE_RANGE
+    for where, text in _header_texts(soup):
+        text = schema.norm_num_text(text)
+        for rx in _MOIST_HEADER_RX:
+            for m in rx.finditer(text):
+                v = float(m.group(1))
+                if lo <= v <= hi:
+                    return v, f"{where}: {m.group(0).strip()}"
+    text = schema.norm_num_text(soup.get_text(" "))
+    for rx in _MOIST_PAGE_RX:
+        for m in rx.finditer(text):
+            v = float(m.group(1))
+            if lo <= v <= hi:
+                return v, f"ページ全体: {m.group(0).strip()}"
+    return np.nan, None
+
+
+def find_moisture(html: str) -> float:
+    """ページ本文から馬場水分 (%) を探す (レース情報欄を優先)."""
+    return find_moisture_detail(html)[0]
 
 
 _CLASS_RX = re.compile(r"(?<![A-Za-z0-9])(A1|A2|B1|B2|B3|B4|C1|C2|OP)(?![0-9])|(オープン)")
-# レース名・条件が書かれていそうな要素 (ページ全体だとナビの他レース名を拾うため先に見る)
-_HEADER_SELECTORS = ".RaceName, .RaceData02, .RaceList_Item02, .raceTitle, .race_title, h1, h2, h3, h4, title"
 
 
 def find_race_class(html: str) -> str | None:
-    from bs4 import BeautifulSoup
-
-    soup = BeautifulSoup(html, "lxml")
+    soup = _soup(html)
     texts = [el.get_text(" ") for el in soup.select(_HEADER_SELECTORS)] + [soup.get_text(" ")]
     for text in texts:
         text = schema.norm_num_text(text)
@@ -214,6 +413,22 @@ def find_race_class(html: str) -> str | None:
     return None
 
 
+def find_race_name(html: str) -> str | None:
+    """レース名 (netkeiba .RaceName / keiba.go.jp 出馬表 h3 / 成績表 .plus1bold02)."""
+    soup = _soup(html)
+    for sel in (".RaceName", ".raceTitle h3", ".plus1bold02"):
+        el = soup.select_one(sel)
+        if el is not None:
+            s = re.sub(r"\s+", " ", el.get_text(" ")).strip()
+            if s:
+                return s
+    return None
+
+
+_DNF_RX = "中止|失格"
+_SCRATCH_RX = "取消|除外|停止"
+
+
 def clean_entries(t: pd.DataFrame) -> pd.DataFrame:
     """パース直後の表 → 正規スキーマに近い形へ."""
     t = t.copy()
@@ -224,14 +439,21 @@ def clean_entries(t: pd.DataFrame) -> pd.DataFrame:
     # 注記行・見出しの繰り返し行などを除く
     keep = t["post"].notna()
     if "horse_name" in t:
-        keep &= t["horse_name"].notna() & (t["horse_name"] != "nan")
+        keep &= t["horse_name"].notna() & (t["horse_name"] != "nan") & (t["horse_name"] != "")
     t = t[keep].copy()
     raw_fin = t["finish"].astype(str) if "finish" in t else pd.Series("", index=t.index)
-    t["finish"] = pd.to_numeric(raw_fin.str.extract(r"^(\d+)")[0], errors="coerce")
+    # 着順列が無い表 (出馬表) では、オッズ・馬体重などの欄に「取消」「除外」と出る
+    other = [c for c in t.columns if c not in ("horse_name", "jockey_name", "trainer_name",
+                                                "post", "frame", "finish")]
+    raw_row = (t[other].map(lambda v: "" if pd.isna(v) else str(v)).agg("".join, axis=1)
+               if other else pd.Series("", index=t.index))
+    t["finish"] = pd.to_numeric(raw_fin.str.extract(r"^\s*(\d+)")[0], errors="coerce")
     if "status" not in t:
         t["status"] = "ok"
-        t.loc[raw_fin.str.contains("中止|失格", na=False), "status"] = "dnf"
-        t.loc[raw_fin.str.contains("取消|除外", na=False), "status"] = "scratch"
+        t.loc[raw_fin.str.contains(_DNF_RX, na=False), "status"] = "dnf"
+        t.loc[raw_fin.str.contains(_SCRATCH_RX, na=False), "status"] = "scratch"
+        t.loc[t["finish"].isna() & ~raw_fin.str.contains(_DNF_RX, na=False)
+              & raw_row.str.contains(_SCRATCH_RX, na=False), "status"] = "scratch"
     if "sex_age" in t:
         sa = t["sex_age"].astype(str)
         t["sex"] = sa.str.extract(r"([牡牝セ騸])")[0].replace({"騸": "セ"})
@@ -242,7 +464,7 @@ def clean_entries(t: pd.DataFrame) -> pd.DataFrame:
         hw = t["horse_weight"].map(schema.norm_num_text)
         if "horse_weight_diff" not in t:
             t["horse_weight_diff"] = pd.to_numeric(
-                hw.str.extract(r"\(([+\-]?\d+)\)")[0], errors="coerce")
+                hw.str.extract(r"\(\s*([+\-]?\d+)\s*\)")[0], errors="coerce")
         else:
             t["horse_weight_diff"] = t["horse_weight_diff"].map(schema.to_float)
         t["horse_weight"] = pd.to_numeric(hw.str.extract(r"(\d{3,4})")[0], errors="coerce")
@@ -251,4 +473,6 @@ def clean_entries(t: pd.DataFrame) -> pd.DataFrame:
     for c in ("odds_win", "popularity"):
         if c in t:
             t[c] = t[c].map(schema.to_float)
+    if "odds_win" in t:
+        t.loc[t["odds_win"] <= 0, "odds_win"] = np.nan
     return t
