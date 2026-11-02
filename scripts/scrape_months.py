@@ -109,7 +109,12 @@ def main() -> None:
             print(f"[skip] {m} (取得済み)", flush=True)
             continue
         t0 = time.time()
-        df = scrape_month(m, f, today)
+        try:
+            df = scrape_month(m, f, today)
+        except Exception as e:  # noqa: BLE001
+            # 欠けた月は保存しない (次回の実行でやり直す。取得済みページはキャッシュから読むので速い)
+            print(f"[fail] {m}: {type(e).__name__} — 後でやり直します", flush=True)
+            continue
         tmp = out.with_suffix(".tmp")
         df.to_csv(tmp, index=False)
         tmp.rename(out)  # 月の途中で止まっても中途半端なファイルを残さない

@@ -98,8 +98,9 @@ def scrape_day(date: pd.Timestamp, fetcher: Fetcher | None = None, max_races: in
         try:
             html = fetcher.get(url, use_cache=not recent)
         except Exception as e:  # noqa: BLE001
-            print(f"  {rid}: 取得失敗 {e}")
-            break
+            # 再試行しても取れなかった: その日を途中までで保存すると欠けたデータになるので、呼び出し側に知らせる
+            print(f"  {rid}: 取得失敗 {e}", flush=True)
+            raise
         df = parse_result(html, rid, date, rn)
         if df is None or df["finish"].notna().sum() == 0:
             fetcher.invalidate(url)

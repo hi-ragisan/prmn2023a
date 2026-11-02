@@ -98,6 +98,36 @@ class Fetcher:
         if p.exists():
             p.unlink()
 
+    # 一時的な失敗 (接続リセット・タイムアウト・429/5xx) は間隔を空けて再試行する。
+    # 403/404 などの拒否・不存在は再試行しない (サイトの意思に反するアクセスを繰り返さない)。
+    RETRY_STATUS = {429, 500, 502, 503, 504}
+    RETRY_WAITS = (5.0, 15.0, 45.0)
+
+    def _get_with_retry(self, url: str):
+        import requests
+
+        for attempt in range(len(self.RETRY_WAITS) + 1):
+            dt = time.time() - self._last
+            if dt < self.wait:
+                time.sleep(self.wait - dt)
+            try:
+                r = self.session.get(url, timeout=30)
+                self._last = time.time()
+                if getattr(r, "status_code", 200) in self.RETRY_STATUS and attempt < len(self.RETRY_WAITS):
+                    raise requests.HTTPError(f"HTTP {r.status_code}", response=r)
+                r.raise_for_status()
+                return r
+            except (requests.ConnectionError, requests.Timeout, requests.HTTPError) as e:
+                self._last = time.time()
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                if status is not None and status not in self.RETRY_STATUS:
+                    raise
+                if attempt >= len(self.RETRY_WAITS):
+                    raise
+                w = self.RETRY_WAITS[attempt]
+                print(f"  再試行 {attempt + 1}/{len(self.RETRY_WAITS)} ({w:.0f}秒後): {type(e).__name__}", flush=True)
+                time.sleep(w)
+
     def get(self, url: str, use_cache: bool = True) -> str:
         p = self._path(url)
         if use_cache and p.exists():
@@ -105,12 +135,7 @@ class Fetcher:
             if text.count("�") < _MOJIBAKE_LIMIT:
                 return text
             # 以前の版で文字コードを決め打ちして化けたキャッシュは取り直す
-        dt = time.time() - self._last
-        if dt < self.wait:
-            time.sleep(self.wait - dt)
-        r = self.session.get(url, timeout=30)
-        self._last = time.time()
-        r.raise_for_status()
+        r = self._get_with_retry(url)
         ctype = r.headers.get("Content-Type", "")
         header_enc = r.encoding if "charset" in ctype.lower() else None
         text, self.last_encoding = decode_html(r.content, header_enc, self.encoding)
