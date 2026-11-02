@@ -18,9 +18,10 @@ KEIBAGO_BANEI_CODE = "3"     # keiba.go.jp の k_babaCode
 # 主に「控除を考慮した理論期待値」の参考値として使う。
 WIN_PAYOUT_RATE = 0.80
 
-# 馬場水分の区分 (ばんえいは水分が高いほど軽い馬場=時計が速い)
+# 馬場水分の区分 (ばんえいは平地競馬と用語が逆: 水分が高いほど「軽馬場」=時計が速い、
+# 乾いているほど「重馬場」=時計がかかる。docs/research_banei.md 参照)
 MOISTURE_BINS = [0.0, 1.5, 2.5, 4.0, 100.0]
-MOISTURE_LABELS = ["乾燥", "標準", "やや重", "重"]
+MOISTURE_LABELS = ["重(乾燥)", "標準", "やや軽", "軽"]
 
 # 時間減衰の半減期 (日)
 JOCKEY_HALF_LIFE_DAYS = 240
